@@ -1,0 +1,57 @@
+{
+  "name": "antigravity-quota-tracker",
+  "displayName": "Antigravity Quota Tracker",
+  "description": "Captures Antigravity Claude/GPT and Gemini quota readings and syncs them to your quota dashboard.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "antigravityQuotaTracker.captureNow",
+        "title": "Antigravity Quota Tracker: Capture Now"
+      }
+    ],
+    "configuration": {
+      "title": "Antigravity Quota Tracker",
+      "properties": {
+        "antigravityQuotaTracker.dashboardUrl": {
+          "type": "string",
+          "default": "http://localhost:4300",
+          "description": "Base URL of your quota dashboard (must expose POST /api/readings)."
+        },
+        "antigravityQuotaTracker.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for authenticating with the dashboard sync endpoint."
+        },
+        "antigravityQuotaTracker.accountIdentifier": {
+          "type": "string",
+          "default": "",
+          "description": "Label for the currently signed-in account on this IDE window. Set one per machine/profile if auto-detection can't read it."
+        },
+        "antigravityQuotaTracker.captureIntervalMinutes": {
+          "type": "number",
+          "default": 7,
+          "description": "How often to capture a reading while the IDE is open, in minutes."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -w -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}
