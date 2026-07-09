@@ -68,7 +68,7 @@ app.post("/api/readings", requireApiKey, (req, res) => {
 // ── POST /api/ocr — image → parsed quota numbers ──────────────────────────────
 //    Accepts multipart/form-data with field "image".
 //    Returns: { claudeGpt, gemini, confidence, rawText } or { error }.
-app.post("/api/ocr", upload.single("image"), (req, res) => {
+app.post("/api/ocr", upload.single("image"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "No image uploaded. Send a multipart/form-data request with field 'image'." });
   }
@@ -82,7 +82,7 @@ app.post("/api/ocr", upload.single("image"), (req, res) => {
   }
 
   try {
-    const { text, quota } = ocrImage(
+    const { text, quota } = await ocrImage(
       req.file.buffer,
       req.file.mimetype,
       TESSERACT_PATH,
@@ -98,8 +98,15 @@ app.post("/api/ocr", upload.single("image"), (req, res) => {
       });
     }
 
+    // Confidence heuristic:
+    //  - "low" if either weekly pct is missing.
+    //  - "low" if weekly pct is 0 AND a reset countdown was found — a genuine
+    //    0% remaining account would not have an active countdown, so this
+    //    almost certainly means OCR returned 0 incorrectly.
+    const cg = quota.claudeGpt || {};
+    const suspiciousZero = cg.weeklyPct === 0 && cg.weeklyResetRaw;
     const confidence =
-      quota.claudeGpt?.weeklyPct != null && quota.claudeGpt?.fiveHourPct != null
+      (cg.weeklyPct != null && cg.fiveHourPct != null && !suspiciousZero)
         ? "high"
         : "low";
 

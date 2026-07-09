@@ -20,11 +20,13 @@ db.exec(`
     claude_weekly_pct REAL,
     claude_fivehour_pct REAL,
     claude_reset_raw TEXT,
+    claude_fivehour_reset_raw TEXT,
     claude_weekly_reset_at TEXT,
     claude_fivehour_reset_at TEXT,
     gemini_weekly_pct REAL,
     gemini_fivehour_pct REAL,
     gemini_reset_raw TEXT,
+    gemini_fivehour_reset_raw TEXT,
     gemini_weekly_reset_at TEXT,
     gemini_fivehour_reset_at TEXT,
     FOREIGN KEY (account_id) REFERENCES accounts(id)
@@ -34,23 +36,34 @@ db.exec(`
     ON readings (account_id, timestamp_utc);
 `);
 
+// Add new raw-countdown columns to existing databases that were created before
+// this schema change (ALTER TABLE IF NOT EXISTS is not valid SQL; we use a
+// try/catch instead).
+for (const col of [
+  "ALTER TABLE readings ADD COLUMN claude_fivehour_reset_raw TEXT",
+  "ALTER TABLE readings ADD COLUMN gemini_fivehour_reset_raw TEXT",
+]) {
+  try { db.exec(col); } catch { /* column already exists — ignore */ }
+}
+
 // --- Reset-time parsing -----------------------------------------------
 
-/** Parses strings like "fully refresh in 4 days" / "resets in 3 hours" into an ISO timestamp. */
+/** Parses strings like "fully refresh in 4 days" / "resets in 3 hours 42 minutes" into an ISO timestamp.
+ *  Handles compound durations: "6 days, 22 hours" → adds both components.
+ */
 function parseCountdownToIso(countdownRaw, fromIso) {
   if (!countdownRaw) return null;
   const from = new Date(fromIso);
-  const match = countdownRaw.match(/(\d+(?:\.\d+)?)\s*(day|hour|minute)s?/i);
-  if (!match) return null;
-  const amount = parseFloat(match[1]);
-  const unit = match[2].toLowerCase();
-  const msPerUnit = { day: 86400000, hour: 3600000, minute: 60000 }[unit];
-  return new Date(from.getTime() + msPerUnit * amount).toISOString();
-}
-
-/** Five Hour Limit is a fixed rolling window, always ~5h from the capture time. */
-function fiveHourResetFromCapture(fromIso) {
-  return new Date(new Date(fromIso).getTime() + 5 * 3600000).toISOString();
+  let totalMs = 0;
+  const re = /(\d+(?:\.\d+)?)\s*(day|hour|minute)s?/gi;
+  let m;
+  while ((m = re.exec(countdownRaw)) !== null) {
+    const amount = parseFloat(m[1]);
+    const unit = m[2].toLowerCase();
+    const msPerUnit = { day: 86400000, hour: 3600000, minute: 60000 }[unit];
+    totalMs += msPerUnit * amount;
+  }
+  return totalMs > 0 ? new Date(from.getTime() + totalMs).toISOString() : null;
 }
 
 // --- Writes --------------------------------------------------------------
@@ -63,9 +76,13 @@ const insertAccountStmt = db.prepare(
 const insertReadingStmt = db.prepare(`
   INSERT INTO readings (
     account_id, timestamp_utc,
-    claude_weekly_pct, claude_fivehour_pct, claude_reset_raw, claude_weekly_reset_at, claude_fivehour_reset_at,
-    gemini_weekly_pct, gemini_fivehour_pct, gemini_reset_raw, gemini_weekly_reset_at, gemini_fivehour_reset_at
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    claude_weekly_pct, claude_fivehour_pct,
+    claude_reset_raw, claude_fivehour_reset_raw,
+    claude_weekly_reset_at, claude_fivehour_reset_at,
+    gemini_weekly_pct, gemini_fivehour_pct,
+    gemini_reset_raw, gemini_fivehour_reset_raw,
+    gemini_weekly_reset_at, gemini_fivehour_reset_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 function upsertReading(reading) {
@@ -73,22 +90,26 @@ function upsertReading(reading) {
 
   insertAccountStmt.run(accountId);
 
-  const claudeWeeklyResetAt = parseCountdownToIso(claudeGpt?.resetCountdownRaw, timestampUtc);
-  const claudeFiveHourResetAt = fiveHourResetFromCapture(timestampUtc);
-  const geminiWeeklyResetAt = gemini ? parseCountdownToIso(gemini.resetCountdownRaw, timestampUtc) : null;
-  const geminiFiveHourResetAt = gemini ? fiveHourResetFromCapture(timestampUtc) : null;
+  // Use the per-row countdown text extracted by ocr.js (Bug 1 fix).
+  // Falls back to null when the text is missing (e.g. manual entry with no countdown).
+  const claudeWeeklyResetAt   = parseCountdownToIso(claudeGpt?.weeklyResetRaw, timestampUtc);
+  const claudeFiveHourResetAt = parseCountdownToIso(claudeGpt?.fiveHourResetRaw, timestampUtc);
+  const geminiWeeklyResetAt   = gemini ? parseCountdownToIso(gemini.weeklyResetRaw, timestampUtc) : null;
+  const geminiFiveHourResetAt = gemini ? parseCountdownToIso(gemini.fiveHourResetRaw, timestampUtc) : null;
 
   insertReadingStmt.run(
     accountId,
     timestampUtc,
     claudeGpt?.weeklyPct ?? null,
     claudeGpt?.fiveHourPct ?? null,
-    claudeGpt?.resetCountdownRaw ?? null,
+    claudeGpt?.weeklyResetRaw ?? null,
+    claudeGpt?.fiveHourResetRaw ?? null,
     claudeWeeklyResetAt,
     claudeFiveHourResetAt,
     gemini?.weeklyPct ?? null,
     gemini?.fiveHourPct ?? null,
-    gemini?.resetCountdownRaw ?? null,
+    gemini?.weeklyResetRaw ?? null,
+    gemini?.fiveHourResetRaw ?? null,
     geminiWeeklyResetAt,
     geminiFiveHourResetAt
   );
@@ -103,11 +124,17 @@ function setCustomName(accountId, customName) {
 
 // --- Reads ---------------------------------------------------------------
 
-/** Ranks by effective five-hour capacity, discounted when weekly balance can't cover a full session. */
+/**
+ * Ranks by effective five-hour capacity.
+ *
+ * NOTE: stored pct values are **% REMAINING** (as shown in the Antigravity UI),
+ * not % consumed.  Do NOT subtract from 100.
+ */
 function recommendationScore(latest) {
   if (latest.claude_weekly_pct == null || latest.claude_fivehour_pct == null) return -Infinity;
-  const weeklyRemaining = 100 - latest.claude_weekly_pct;
-  const fiveHourRemaining = 100 - latest.claude_fivehour_pct;
+  // Values are already "remaining" — use directly.
+  const weeklyRemaining   = latest.claude_weekly_pct;
+  const fiveHourRemaining = latest.claude_fivehour_pct;
   const FULL_SESSION_WEEKLY_COST = 33; // ~1/3 of weekly per full five-hour session
   const weeklyCappedCapacity = (weeklyRemaining / FULL_SESSION_WEEKLY_COST) * 100;
   return Math.min(fiveHourRemaining, weeklyCappedCapacity);
@@ -174,12 +201,13 @@ function getAnalytics(days) {
     })),
   }));
 
-  // ── Heatmap: avg Claude weekly consumed per day-of-week ───────────────────
+  // ── Heatmap: avg Claude weekly CONSUMED per day-of-week ────────────────────────
+  // Stored pct = remaining, so consumption = 100 - remaining.
   // SQLite strftime('%w') → 0=Sun … 6=Sat; we remap to 0=Mon … 6=Sun.
   const heatmapRows = db.prepare(`
     SELECT
       (CAST(strftime('%w', timestamp_utc) AS INTEGER) + 6) % 7 AS dow,
-      AVG(claude_weekly_pct) AS avg_pct,
+      (100 - AVG(claude_weekly_pct)) AS avg_consumed,
       COUNT(*) AS n
     FROM readings
     WHERE timestamp_utc >= ?
@@ -190,7 +218,7 @@ function getAnalytics(days) {
   const DOW_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const heatmap = DOW_LABELS.map((label, i) => {
     const row = heatmapRows.find((r) => r.dow === i);
-    return { dow: i, label, avgPct: row ? row.avg_pct : null, count: row ? row.n : 0 };
+    return { dow: i, label, avgPct: row ? row.avg_consumed : null, count: row ? row.n : 0 };
   });
 
   // ── Session count (5-hour-limit resets observed) ──────────────────────────
@@ -235,8 +263,9 @@ function getAnalytics(days) {
       `).all();
 
       const maxUsed = Math.max(...latestRows.map((r) => r.claude_weekly_pct ?? 0));
-      const remaining = 100 - maxUsed;
-      daysRemaining = avgRate > 0 ? Math.max(0, remaining / avgRate) : null;
+      // pct is "remaining" — the most constrained account is the one with the LEAST remaining.
+      const minRemaining = Math.min(...latestRows.map((r) => r.claude_weekly_pct ?? 100));
+      daysRemaining = avgRate > 0 ? Math.max(0, minRemaining / avgRate) : null;
     }
   } catch { /* non-fatal */ }
 

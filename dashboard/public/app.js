@@ -12,19 +12,25 @@ function fmtPct(v) {
 }
 
 function timeUntil(iso) {
-  if (!iso) return "unknown";
+  if (!iso) return "—";
   const ms = new Date(iso).getTime() - Date.now();
-  if (ms <= 0) return "due now";
-  const hrs = ms / 3600000;
-  if (hrs < 1) return `${Math.round(ms / 60000)}m`;
-  if (hrs < 48) return `${Math.round(hrs)}h`;
-  return `${Math.round(hrs / 24)}d`;
+  if (ms <= 0) return "now";
+  const totalMins = Math.floor(ms / 60000);
+  const mins  = totalMins % 60;
+  const hrs   = Math.floor(totalMins / 60) % 24;
+  const days  = Math.floor(totalMins / 1440);
+  if (days > 0 && hrs > 0) return `${days}d ${hrs}h`;
+  if (days > 0)            return `${days}d`;
+  if (hrs > 0 && mins > 0) return `${hrs}h ${mins}m`;
+  if (hrs > 0)             return `${hrs}h`;
+  return `${mins}m`;
 }
 
 function barClass(pct, base) {
   if (pct == null) return base;
-  if (pct >= 90) return "danger";
-  if (pct >= 70) return "warn";
+  // pct = % REMAINING.  Danger/warn thresholds are now on LOW remaining.
+  if (pct <= 10) return "danger";
+  if (pct <= 30) return "warn";
   return base;
 }
 
@@ -100,8 +106,9 @@ function renderRecommendation(accounts) {
   const best = withScore[0];
   box.hidden = false;
   $("#recName").textContent = best.displayName;
-  const weeklyRemaining = 100 - best.latest.claude_weekly_pct;
-  const fhRemaining = 100 - best.latest.claude_fivehour_pct;
+  // pct values are already "% remaining" — use directly, no 100-inversion.
+  const weeklyRemaining = best.latest.claude_weekly_pct;
+  const fhRemaining     = best.latest.claude_fivehour_pct;
   $("#recWhy").textContent =
     `${Math.round(fhRemaining)}% five-hour and ${Math.round(weeklyRemaining)}% weekly remaining — most headroom for a full session right now.`;
 }
@@ -147,8 +154,15 @@ function renderGrid(accounts) {
         ` : ""}
       </div>
       <div class="card-footer">
-        <span>5hr reset in ${l ? timeUntil(l.claude_fivehour_reset_at) : "—"}</span>
-        <span class="${stale ? "stale-tag" : ""}">${stale ? "stale" : "live"} · ${l ? timeUntil(l.claude_weekly_reset_at) : "—"} to weekly reset</span>
+        <div class="card-reset-row">
+          <span class="reset-label">5-hour resets in</span>
+          <span class="reset-value">${l?.claude_fivehour_reset_at ? timeUntil(l.claude_fivehour_reset_at) : "—"}</span>
+        </div>
+        <div class="card-reset-row">
+          <span class="reset-label">Weekly resets in</span>
+          <span class="reset-value">${l?.claude_weekly_reset_at ? timeUntil(l.claude_weekly_reset_at) : "—"}</span>
+        </div>
+        ${stale ? `<div class="stale-tag">stale · captured ${timeUntil(l?.timestamp_utc)} ago</div>` : ""}
       </div>
     `;
     grid.appendChild(card);
@@ -256,14 +270,17 @@ async function runOcr(blob, mime) {
       return;
     }
 
-    // Populate fields
+    // Populate all six fields from OCR response
     const cg = data.claudeGpt || {};
     const gm = data.gemini || {};
-    $("#f-claude-weekly").value = cg.weeklyPct ?? "";
-    $("#f-claude-5hr").value    = cg.fiveHourPct ?? "";
-    $("#f-claude-reset").value  = cg.resetCountdownRaw ?? "";
-    $("#f-gemini-weekly").value = gm.weeklyPct ?? "";
-    $("#f-gemini-5hr").value    = gm.fiveHourPct ?? "";
+    $("#f-claude-weekly").value          = cg.weeklyPct ?? "";
+    $("#f-claude-5hr").value             = cg.fiveHourPct ?? "";
+    $("#f-claude-reset").value           = cg.weeklyResetRaw ?? "";
+    $("#f-claude-fivehour-reset").value  = cg.fiveHourResetRaw ?? "";
+    $("#f-gemini-weekly").value          = gm.weeklyPct ?? "";
+    $("#f-gemini-5hr").value             = gm.fiveHourPct ?? "";
+    $("#f-gemini-reset").value           = gm.weeklyResetRaw ?? "";
+    $("#f-gemini-fivehour-reset").value  = gm.fiveHourResetRaw ?? "";
 
     if (data.confidence === "low") {
       status.className = "ocr-status warn";
@@ -338,18 +355,20 @@ $("#saveReadingBtn").addEventListener("click", async () => {
     accountId,
     timestampUtc: new Date().toISOString(),
     claudeGpt: {
-      weeklyPct: claudeWeekly,
-      fiveHourPct: parseFloat($("#f-claude-5hr").value) || 0,
-      resetCountdownRaw: $("#f-claude-reset").value.trim(),
+      weeklyPct:        claudeWeekly,
+      fiveHourPct:      parseFloat($("#f-claude-5hr").value) || 0,
+      weeklyResetRaw:   $("#f-claude-reset").value.trim(),
+      fiveHourResetRaw: $("#f-claude-fivehour-reset").value.trim(),
     },
   };
 
   const gWeekly = parseFloat($("#f-gemini-weekly").value);
   if (!isNaN(gWeekly)) {
     body.gemini = {
-      weeklyPct: gWeekly,
-      fiveHourPct: parseFloat($("#f-gemini-5hr").value) || 0,
-      resetCountdownRaw: "",
+      weeklyPct:        gWeekly,
+      fiveHourPct:      parseFloat($("#f-gemini-5hr").value) || 0,
+      weeklyResetRaw:   $("#f-gemini-reset").value.trim(),
+      fiveHourResetRaw: $("#f-gemini-fivehour-reset").value.trim(),
     };
   }
 
@@ -489,6 +508,7 @@ function renderBurnChart(data) {
         },
         y: {
           min: 0, max: 100,
+          title: { display: true, text: "% remaining", color: "#8890a6", font: { size: 11 } },
           ticks: {
             color: "#8890a6",
             font: { family: "IBM Plex Mono", size: 11 },
@@ -502,7 +522,7 @@ function renderBurnChart(data) {
           labels: { color: "#e7eaf3", font: { family: "Inter", size: 12 } },
         },
         tooltip: {
-          callbacks: { label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y?.toFixed(1)}%` },
+          callbacks: { label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y?.toFixed(1)}% remaining` },
         },
       },
     },
@@ -537,13 +557,14 @@ function renderEfficiency(data) {
   if (!accounts.length) { list.textContent = "Not enough readings for efficiency stats."; return; }
 
   accounts.forEach((s) => {
-    const pctsPerDay = [];
+    const consumedPerReading = [];
     for (let i = 1; i < s.points.length; i++) {
-      const delta = s.points[i].claudeWeeklyPct - s.points[i - 1].claudeWeeklyPct;
-      if (delta > 0) pctsPerDay.push(delta);
+      // pct = remaining; consumption = decrease in remaining between readings
+      const delta = s.points[i - 1].claudeWeeklyPct - s.points[i].claudeWeeklyPct;
+      if (delta > 0) consumedPerReading.push(delta);
     }
-    const avg = pctsPerDay.length
-      ? pctsPerDay.reduce((a, b) => a + b, 0) / pctsPerDay.length
+    const avg = consumedPerReading.length
+      ? consumedPerReading.reduce((a, b) => a + b, 0) / consumedPerReading.length
       : null;
 
     const row = document.createElement("div");

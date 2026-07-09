@@ -278,13 +278,24 @@ html, body {
   padding-top: 14px;
   border-top: 1px solid var(--hairline);
   display: flex;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 4px;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-muted);
 }
 
-.stale-tag { color: var(--warn); }
+.card-reset-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.reset-label { color: var(--text-muted); }
+.reset-value { color: var(--text); font-weight: 600; }
+
+.stale-tag { color: var(--warn); margin-top: 2px; font-size: 10px; }
 
 .empty-state {
   color: var(--text-muted);

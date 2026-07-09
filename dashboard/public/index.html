@@ -95,26 +95,38 @@
         <div class="ocr-fields">
           <div class="ocr-section-head">Claude / GPT</div>
           <div class="ocr-row">
-            <label for="f-claude-weekly">Weekly used %</label>
+            <label for="f-claude-weekly">Weekly remaining %</label>
             <input id="f-claude-weekly" type="number" min="0" max="100" class="ocr-input" placeholder="—" />
           </div>
           <div class="ocr-row">
-            <label for="f-claude-5hr">5-hour used %</label>
+            <label for="f-claude-5hr">5-hour remaining %</label>
             <input id="f-claude-5hr" type="number" min="0" max="100" class="ocr-input" placeholder="—" />
           </div>
           <div class="ocr-row">
             <label for="f-claude-reset">Weekly reset (raw text)</label>
-            <input id="f-claude-reset" type="text" class="ocr-input" placeholder="e.g. 4 days, 19 hours" />
+            <input id="f-claude-reset" type="text" class="ocr-input" placeholder="e.g. 6 days, 22 hours" />
+          </div>
+          <div class="ocr-row">
+            <label for="f-claude-fivehour-reset">Five-hour reset (raw text)</label>
+            <input id="f-claude-fivehour-reset" type="text" class="ocr-input" placeholder="e.g. 1 hour, 42 minutes" />
           </div>
 
           <div class="ocr-section-head" style="margin-top:16px">Gemini</div>
           <div class="ocr-row">
-            <label for="f-gemini-weekly">Weekly used %</label>
+            <label for="f-gemini-weekly">Weekly remaining %</label>
             <input id="f-gemini-weekly" type="number" min="0" max="100" class="ocr-input" placeholder="— (optional)" />
           </div>
           <div class="ocr-row">
-            <label for="f-gemini-5hr">5-hour used %</label>
+            <label for="f-gemini-5hr">5-hour remaining %</label>
             <input id="f-gemini-5hr" type="number" min="0" max="100" class="ocr-input" placeholder="— (optional)" />
+          </div>
+          <div class="ocr-row">
+            <label for="f-gemini-reset">Weekly reset (raw text)</label>
+            <input id="f-gemini-reset" type="text" class="ocr-input" placeholder="— (optional)" />
+          </div>
+          <div class="ocr-row">
+            <label for="f-gemini-fivehour-reset">Five-hour reset (raw text)</label>
+            <input id="f-gemini-fivehour-reset" type="text" class="ocr-input" placeholder="— (optional)" />
           </div>
         </div>
 
@@ -175,7 +187,7 @@
 
     <!-- Heatmap -->
     <div class="analytics-chart-card">
-      <div class="analytics-chart-title">Usage by day of week (avg weekly %)</div>
+      <div class="analytics-chart-title">Avg weekly consumption by day of week</div>
       <div id="heatmapGrid" class="heatmap-grid"></div>
     </div>
 
