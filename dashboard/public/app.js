@@ -129,29 +129,51 @@ function renderGrid(accounts) {
     const l = acct.latest;
     const stale = l ? isStale(l.timestamp_utc) : true;
 
+    // Show email ID only when it differs from displayName (i.e. no custom name set)
+    const emailSub = acct.id !== acct.displayName
+      ? `<div class="card-email">${escapeHtml(acct.id)}</div>`
+      : `<div class="card-email">${escapeHtml(acct.id)}</div>`;
+
+    // Last captured time
+    const capturedAgo = l?.timestamp_utc
+      ? `<span class="card-captured">captured ${timeUntil(l.timestamp_utc)} ago</span>`
+      : `<span class="card-captured">no reading yet</span>`;
+
+    const geminiSection = (l?.gemini_weekly_pct != null || l?.gemini_fivehour_pct != null) ? `
+      <div class="section-divider"></div>
+      <div class="ring-readout-row">
+        <span class="label">Gemini — Weekly</span>
+        <span class="value">${fmtPct(l?.gemini_weekly_pct)}</span>
+      </div>
+      <div class="bar-track"><div class="bar-fill gemini" style="width:${l?.gemini_weekly_pct ?? 0}%"></div></div>
+      <div class="ring-readout-row">
+        <span class="label">Gemini — 5hr</span>
+        <span class="value">${fmtPct(l?.gemini_fivehour_pct)}</span>
+      </div>
+      <div class="bar-track"><div class="bar-fill gemini-fh" style="width:${l?.gemini_fivehour_pct ?? 0}%"></div></div>
+    ` : "";
+
     card.innerHTML = `
       <div class="card-top">
-        <div class="card-name">${escapeHtml(acct.displayName)}</div>
+        <div>
+          <div class="card-name">${escapeHtml(acct.displayName)}</div>
+          ${emailSub}
+        </div>
         <div class="card-rank">#${idx + 1}</div>
       </div>
       <div class="ring-readout">
+        <div class="section-label">Claude / GPT</div>
         <div class="ring-readout-row">
-          <span class="label">Claude/GPT — Weekly</span>
+          <span class="label">Weekly remaining</span>
           <span class="value">${fmtPct(l?.claude_weekly_pct)}</span>
         </div>
         <div class="bar-track"><div class="bar-fill ${barClass(l?.claude_weekly_pct, "claude")}" style="width:${l?.claude_weekly_pct ?? 0}%"></div></div>
         <div class="ring-readout-row">
-          <span class="label">Claude/GPT — 5hr</span>
+          <span class="label">5-hour remaining</span>
           <span class="value">${fmtPct(l?.claude_fivehour_pct)}</span>
         </div>
         <div class="bar-track"><div class="bar-fill ${barClass(l?.claude_fivehour_pct, "claude-fh")}" style="width:${l?.claude_fivehour_pct ?? 0}%"></div></div>
-        ${l?.gemini_weekly_pct != null ? `
-        <div class="ring-readout-row">
-          <span class="label">Gemini — Weekly</span>
-          <span class="value">${fmtPct(l?.gemini_weekly_pct)}</span>
-        </div>
-        <div class="bar-track"><div class="bar-fill gemini" style="width:${l?.gemini_weekly_pct ?? 0}%"></div></div>
-        ` : ""}
+        ${geminiSection}
       </div>
       <div class="card-footer">
         <div class="card-reset-row">

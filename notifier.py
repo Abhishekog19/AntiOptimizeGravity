@@ -1,21 +1,19 @@
 """
 notifier.py — Antigravity Quota Tracker v3
 
-Polls the Antigravity IDE's Chrome DevTools Protocol (CDP) endpoint every
-2 seconds. When the user clicks Sign Out from the profile dropdown the
-confirmation dialog ("Sign out of '<name>'?") appears in the Settings DOM.
+Polls every 2 seconds for the profile dropdown Sign Out button in Antigravity IDE.
+When the user clicks their profile icon, the dropdown renders a 'Sign Out'
+button element in the editor DOM. This notifier detects it via a targeted
+element query (NOT innerText scan) which is immune to false positives from
+chat/editor content.
+
 At that moment this script silently:
-
-  1. Reads the account email from DOM leaf nodes
-  2. Clicks the 'Models' nav button and waits for the panel to render
-  3. Clicks the last 'Refresh' button (= Models section, not MCP)
-  4. Waits 3 s for fresh data to load
-  5. Reads innerText, parses quota percentages + reset countdowns
-  6. POSTs the reading to the local dashboard at http://localhost:4300
-  7. Fires a Windows toast notification with the summary
-
-The capture runs entirely in the background while the confirmation dialog
-is still open, so no extra clicks or waiting is needed.
+  1. Reads the account email from the dropdown DOM (near the Sign Out button)
+  2. Uses the Settings > Models page (settingsScreen CDP target) for quota
+  3. Clicks the last 'Refresh' button on the Models panel
+  4. Waits 3 s, reads innerText, parses quota percentages + reset countdowns
+  5. POSTs the reading to the local dashboard at http://localhost:4300
+  6. Fires a Windows toast notification with the summary
 
 Prerequisites:
   * Antigravity IDE launched with --remote-debugging-port=9222
@@ -32,11 +30,48 @@ Usage:
 # Configuration
 # ---------------------------------------------------------------------------
 
-CDP_PORT        = 9222
-DASHBOARD_URL   = "http://localhost:4300"
-POLL_INTERVAL   = 2          # seconds between DOM checks
-DEBOUNCE        = 30         # minimum seconds between captures
-SIGN_OUT_MARKER = "Sign out of"   # unique string in confirmation dialog
+CDP_PORT       = 9222
+DASHBOARD_URL  = "http://localhost:4300"
+POLL_INTERVAL  = 2          # seconds between DOM checks
+DEBOUNCE       = 30         # minimum seconds between captures
+
+# JS expression evaluated in each editor page target every POLL_INTERVAL.
+# Returns the user email string if the Sign Out button is visible in the DOM
+# (i.e. the profile dropdown is open), otherwise returns null.
+# Uses element queries — NOT innerText — so chat/editor text never triggers it.
+DROPDOWN_DETECT_JS = r"""
+(function() {
+    // Find a Sign Out button/menuitem currently visible in the DOM
+    const candidates = [
+        ...document.querySelectorAll(
+            'button, li, a, [role="menuitem"], [role="option"], [role="listitem"]'
+        )
+    ];
+    const signOutEl = candidates.find(
+        el => el.innerText && el.innerText.trim() === 'Sign Out'
+    );
+    if (!signOutEl) return null;
+
+    // Sign Out button is visible: now find the email in the surrounding dropdown.
+    // Walk up to the dropdown root, then find the email-like text node.
+    let root = signOutEl.parentElement;
+    for (let i = 0; i < 8 && root; i++) {
+        const text = root.innerText || '';
+        const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+        const email = lines.find(
+            l => l.length < 100 && !l.includes(' ') &&
+                 l.indexOf('@') > 0 &&
+                 l.indexOf('@') === l.lastIndexOf('@') &&
+                 l.lastIndexOf('.') > l.indexOf('@')
+        );
+        if (email) return email;
+        root = root.parentElement;
+    }
+
+    // Email not found in ancestors: return sentinel so we know dropdown IS open
+    return '__dropdown_open__';
+})()
+"""
 
 # ---------------------------------------------------------------------------
 # Imports
@@ -69,7 +104,11 @@ DRY_RUN = "--dry-run" in sys.argv
 
 def log(msg: str) -> None:
     ts = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+    line = f"[{ts}] {msg}"
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        print(line.encode("ascii", errors="replace").decode("ascii"), flush=True)
 
 # ---------------------------------------------------------------------------
 # Toast notifications
@@ -131,20 +170,57 @@ def _http_get_json(url: str, timeout: float = 5.0):
         return json.loads(resp.read().decode())
 
 
+# Simple email pattern: no whitespace, exactly one @, at least one dot after @
+_EMAIL_RE = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
+
+
+def _get_all_page_targets(port: int = CDP_PORT) -> list:
+    """Return all CDP page targets, or [] if the port is unreachable."""
+    try:
+        return [t for t in _http_get_json(f"http://localhost:{port}/json")
+                if t.get("type") == "page"]
+    except Exception:
+        return []
+
+
 def find_settings_target(port: int = CDP_PORT):
-    """Return the best CDP target dict, or None if unreachable."""
+    """
+    Return the CDP target for the Antigravity Settings page, or None.
+    Requires 'settingsScreen' in the URL — exactly as test-e.js uses it.
+    Does NOT fall back to other page targets to avoid reading the editor window.
+    """
     try:
         targets = _http_get_json(f"http://localhost:{port}/json")
     except Exception:
         return None
-    # Prefer a target with 'setting' in the URL; fall back to any page target
     for t in targets:
-        if t.get("type") == "page" and "setting" in t.get("url", "").lower():
-            return t
-    for t in targets:
-        if t.get("type") == "page":
+        if t.get("type") == "page" and "settingsScreen" in t.get("url", ""):
             return t
     return None
+
+
+def scan_for_signout(port: int = CDP_PORT):
+    """
+    Scan ALL CDP page targets for the Sign-out confirmation dialog text.
+    Returns (target, innerText) for the first matching target, or (None, '').
+
+    The Sign-out dialog is a workbench-level modal in Electron — it may appear
+    in any page target's DOM, not necessarily in 'settingsScreen'.
+    settingsScreen is still preferred when present (for email + quota reads).
+    """
+    pages = _get_all_page_targets(port)
+    if not pages:
+        return None, ""
+
+    # Prefer settingsScreen; put it first so it's checked before editor windows
+    pages.sort(key=lambda t: (0 if "settingsScreen" in t.get("url", "") else 1))
+
+    for t in pages:
+        text = cdp_get_innertext(t)
+        if SIGN_OUT_MARKER in text:
+            return t, text
+
+    return None, ""
 
 
 # --- Minimal WebSocket client (stdlib only, no dependencies) ----------------
@@ -152,19 +228,31 @@ def find_settings_target(port: int = CDP_PORT):
 def _ws_evaluate(ws_url: str, expression: str, timeout: float = 8.0):
     """
     Execute a JS expression via Runtime.evaluate over a raw WebSocket.
-    Uses websocket-client library if available, otherwise falls back to
-    a stdlib-only implementation.
+    Always tries the stdlib implementation first (no Origin header sent,
+    so Electron's CDP server never returns 403 Forbidden).
+    Falls back to websocket-client if stdlib fails for any other reason.
     Returns the result value or None.
     """
+    # Stdlib path first — sends no Origin header, avoids Electron 403
+    try:
+        return _ws_eval_stdlib(ws_url, expression, timeout)
+    except Exception:
+        pass
+    # websocket-client fallback (pass origin="" to suppress auto-Origin header)
     try:
         import websocket
         return _ws_eval_wsclient(websocket, ws_url, expression, timeout)
     except ImportError:
-        return _ws_eval_stdlib(ws_url, expression, timeout)
+        pass
+    except Exception:
+        pass
+    return None
 
 
 def _ws_eval_wsclient(websocket, ws_url: str, expression: str, timeout: float):
-    ws = websocket.create_connection(ws_url, timeout=timeout)
+    # Pass origin="" so websocket-client does not auto-set
+    # 'Origin: http://localhost:9222' which Electron's CDP rejects with 403.
+    ws = websocket.create_connection(ws_url, timeout=timeout, origin="")
     try:
         msg_id = 1
         ws.send(json.dumps({
@@ -428,37 +516,80 @@ def post_reading(email: str, quota: dict, captured_at: datetime.datetime) -> boo
 _state = {"capturing": False, "last_capture_time": 0.0}
 
 
-def run_capture_sequence(target: dict) -> None:
-    """Full capture — runs in a daemon thread."""
+def run_capture_sequence(dropdown_target: dict) -> None:
+    """
+    Full capture sequence — runs in a daemon thread.
+
+    Email is read from the settingsScreen target by navigating to Account
+    via history.pushState (confirmed working in test-d.js line 18).
+    Quota is read from the same target navigated back to Models.
+    """
     _state["capturing"] = True
     captured_at = datetime.datetime.now()
     log("== Capture sequence started ==================================")
     try:
-        # 1. Read email
-        email = cdp_evaluate(target, r"""
-            Array.from(document.querySelectorAll('*'))
-                .filter(el => el.children.length === 0
-                           && el.innerText?.includes('@'))
-                .map(el => el.innerText.trim())
-                .find(t => t.includes('.') && t.length < 100) || null
+        # 1. Find the Settings target (settingsScreen URL).
+        #    All email + quota reads happen here on the clean Settings page.
+        settings_target = find_settings_target(port=CDP_PORT)
+        if not settings_target:
+            log("  Settings target not found -- open Settings > Models before signing out")
+            toast("Capture failed: open Settings > Models first")
+            return
+        log(f"  Settings target: {settings_target.get('url','')[:70]}")
+
+        # 2. Navigate to Account page via history.pushState (test-d.js line 18).
+        cdp_evaluate(settings_target,
+                     "history.pushState({}, '', '/?settingsScreen=Account')")
+        log("  Navigated to Account page")
+        time.sleep(1.5)
+
+        # 3. Read email using regex scan on full innerText (test-d.js lines 28-33).
+        #    This is the confirmed-working approach from the test scripts.
+        email_raw = cdp_evaluate(settings_target, r"""
+            (function() {
+                const text = document.documentElement.innerText;
+                const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+                const matches = [...new Set(text.match(emailRegex) || [])];
+                return matches.find(m => m.length < 100 && m.indexOf('.') > m.indexOf('@'))
+                    || null;
+            })()
         """)
+        log(f"  Email (regex scan): {email_raw!r}")
+        email = email_raw if (email_raw and _EMAIL_RE.match(str(email_raw))) else None
+
+        # Fallback: test-e.js leaf-node scan (lines 26-35)
         if not email:
-            log("  Email: NOT FOUND")
-            toast("Capture failed: could not read email")
+            email_leaf = cdp_evaluate(settings_target, r"""
+                (function() {
+                    const allElements = Array.from(document.querySelectorAll('*'));
+                    let emailEl = null;
+                    for (const el of allElements) {
+                        if (el.children.length === 0 && el.innerText &&
+                            el.innerText.includes('@') && el.innerText.includes('.')) {
+                            emailEl = el;
+                        }
+                    }
+                    return emailEl ? emailEl.innerText.trim() : null;
+                })()
+            """)
+            log(f"  Email (leaf scan): {email_leaf!r}")
+            if email_leaf and _EMAIL_RE.match(str(email_leaf)):
+                email = email_leaf
+
+        if not email:
+            log("  Email: NOT FOUND on Account page")
+            toast("Capture failed: could not read email from Settings > Account")
             return
         log(f"  Email: {email}")
 
-        # 2-3. Navigate to Models tab
-        cdp_evaluate(target, r"""
-            const btn = [...document.querySelectorAll('button')]
-                .find(b => b.innerText.trim() === 'Models');
-            if (btn) btn.click();
-        """)
-        log("  Clicked 'Models' button")
+        # 4. Navigate back to Models page (history.pushState).
+        cdp_evaluate(settings_target,
+                     "history.pushState({}, '', '/?settingsScreen=Models')")
+        log("  Navigated back to Models")
         time.sleep(0.8)
 
-        # 4. Click last Refresh button (= Models section)
-        cdp_evaluate(target, r"""
+        # 5. Click the last Refresh button (= Models section, not MCP).
+        cdp_evaluate(settings_target, r"""
             const btns = [...document.querySelectorAll('button')]
                 .filter(b => b.innerText.trim() === 'Refresh');
             if (btns.length) btns[btns.length - 1].click();
@@ -466,12 +597,12 @@ def run_capture_sequence(target: dict) -> None:
         log("  Clicked 'Refresh' (last)")
         time.sleep(3.0)
 
-        # 5. Read + parse
-        text  = cdp_get_innertext(target)
+        # 6. Read and parse quota.
+        text  = cdp_get_innertext(settings_target)
         quota = parse_quota(text)
 
         if not quota:
-            log("  Parse failed — Models panel not rendered?")
+            log("  Parse failed -- Settings > Models not loaded?")
             toast(f"Capture failed: parse error for {email}")
             return
 
@@ -480,21 +611,21 @@ def run_capture_sequence(target: dict) -> None:
         log(f"  Claude/GPT  weekly={cg.get('weeklyPct')}%  5hr={cg.get('fiveHourPct')}%")
         log(f"  Gemini      weekly={gem.get('weeklyPct')}%  5hr={gem.get('fiveHourPct')}%")
 
-        # 6. POST
+        # 7. POST to dashboard.
         ok = post_reading(email, quota, captured_at)
 
-        # 7. Toast
-        lines = []
+        # 8. Toast.
+        msg_lines = []
         if cg:
-            lines.append(f"Claude/GPT: {cg.get('weeklyPct')}% weekly / {cg.get('fiveHourPct')}% 5hr")
+            msg_lines.append(f"Claude/GPT: {cg.get('weeklyPct')}% weekly / {cg.get('fiveHourPct')}% 5hr")
         if gem:
-            lines.append(f"Gemini:     {gem.get('weeklyPct')}% weekly / {gem.get('fiveHourPct')}% 5hr")
+            msg_lines.append(f"Gemini:     {gem.get('weeklyPct')}% weekly / {gem.get('fiveHourPct')}% 5hr")
         if not ok:
-            lines.append("(!) Dashboard POST failed")
+            msg_lines.append("(!) Dashboard POST failed")
 
         toast(
-            "\n".join(lines) if lines else "Quota captured",
-            title=f"Quota saved — {email}",
+            "\n".join(msg_lines) if msg_lines else "Quota captured",
+            title=f"Quota saved - {email}",
         )
         _state["last_capture_time"] = time.time()
 
@@ -505,6 +636,7 @@ def run_capture_sequence(target: dict) -> None:
         _state["capturing"] = False
         log("== Capture sequence finished =================================")
 
+
 # ---------------------------------------------------------------------------
 # Main polling loop
 # ---------------------------------------------------------------------------
@@ -513,9 +645,10 @@ def main() -> None:
     mode = "DRY-RUN" if DRY_RUN else "LIVE"
     log(f"Antigravity Quota Tracker v3  [{mode}]")
     log(f"CDP port={CDP_PORT}  poll={POLL_INTERVAL}s  debounce={DEBOUNCE}s  dashboard={DASHBOARD_URL}")
-    log("Waiting for Sign-Out confirmation dialog …\n")
+    log("Trigger: profile dropdown Sign Out button detected via element query")
+    log("")
 
-    no_target_warned_at: float = 0.0
+    no_pages_warned_at: float = 0.0
 
     while True:
         try:
@@ -523,32 +656,46 @@ def main() -> None:
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            target = find_settings_target(port=CDP_PORT)
+            pages = _get_all_page_targets(port=CDP_PORT)
 
-            if not target:
-                if time.time() - no_target_warned_at > 30:
-                    log(f"No CDP target — is Antigravity running with "
+            if not pages:
+                if time.time() - no_pages_warned_at > 30:
+                    log(f"No CDP page targets -- is Antigravity running with "
                         f"--remote-debugging-port={CDP_PORT}?")
-                    no_target_warned_at = time.time()
+                    no_pages_warned_at = time.time()
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # Reset the "no target" warning once we have a target
-            no_target_warned_at = 0.0
+            no_pages_warned_at = 0.0
 
-            text = cdp_get_innertext(target)
+            # Run DROPDOWN_DETECT_JS on each editor page target.
+            # This queries for an actual 'Sign Out' button element —
+            # immune to chat/editor text false positives.
+            found_target  = None
+            found_result  = None
+            for t in pages:
+                if "settingsScreen" in t.get("url", ""):
+                    continue   # skip — dropdown never renders in Settings page
+                result = cdp_evaluate(t, DROPDOWN_DETECT_JS)
+                if result:   # non-null = Sign Out button visible
+                    found_target = t
+                    found_result = result
+                    break
 
-            if SIGN_OUT_MARKER in text:
+            if found_target:
                 elapsed = time.time() - _state["last_capture_time"]
+                url_short = found_target.get("url", "")[:60]
                 if elapsed > DEBOUNCE:
-                    log(f"Sign-out dialog detected — starting capture (last={elapsed:.0f}s ago)")
+                    log(f"Sign Out button detected in: {url_short!r}")
+                    log(f"  detect result: {found_result!r}  (debounce: {elapsed:.0f}s)")
                     threading.Thread(
                         target=run_capture_sequence,
-                        args=(target,),
+                        args=(found_target,),
                         daemon=True,
                     ).start()
                 else:
-                    log(f"Sign-out dialog detected — debounced ({elapsed:.0f}s < {DEBOUNCE}s)")
+                    log(f"Sign Out button detected -- debounced "
+                        f"({elapsed:.0f}s < {DEBOUNCE}s)")
 
         except Exception as exc:
             log(f"Polling error: {exc}")

@@ -295,7 +295,49 @@ html, body {
 .reset-label { color: var(--text-muted); }
 .reset-value { color: var(--text); font-weight: 600; }
 
-.stale-tag { color: var(--warn); margin-top: 2px; font-size: 10px; }
+.stale-tag { color: var(--warn); font-size: 10px; }
+
+/* Email sub-label under card name */
+.card-email {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 3px;
+  word-break: break-all;
+}
+
+/* "Claude / GPT" / "Gemini" section heading inside card */
+.section-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--claude);
+  margin-bottom: 8px;
+}
+
+/* Thin rule between Claude and Gemini sections */
+.section-divider {
+  height: 1px;
+  background: var(--hairline);
+  margin: 10px 0 12px;
+}
+
+/* Gemini 5-hr bar — lighter violet */
+.bar-fill.gemini-fh { background: rgba(155,135,245,0.55); }
+
+/* Footer meta row: "captured X ago" + stale badge side-by-side */
+.card-footer-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.card-captured {
+  color: var(--text-muted);
+  font-size: 10px;
+}
 
 .empty-state {
   color: var(--text-muted);

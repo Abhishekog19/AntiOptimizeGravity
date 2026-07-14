@@ -50,14 +50,37 @@ function requireApiKey(req, res, next) {
   next();
 }
 
-// ── POST /api/readings — manual save (existing route, unchanged) ──────────────
+// ── POST /api/readings — accept both UI and notifier payload formats ─────────
+// UI format:       { accountId, timestampUtc, claudeGpt, gemini? }
+// Notifier format: { accountId, capturedAt, quota: { claudeGpt, gemini? } }
 app.post("/api/readings", requireApiKey, (req, res) => {
-  const { accountId, timestampUtc, claudeGpt } = req.body || {};
+  let body = req.body || {};
+
+  // Normalise notifier format → db format
+  if (body.capturedAt && body.quota) {
+    // Rename notifier field names to what db.js expects
+    const fixSection = (s) => s ? {
+      ...s,
+      weeklyResetRaw:   s.weeklyReset   ?? s.weeklyResetRaw   ?? null,
+      fiveHourResetRaw: s.fiveHourReset ?? s.fiveHourResetRaw ?? null,
+    } : undefined;
+
+    body = {
+      accountId:    body.accountId,
+      timestampUtc: body.capturedAt,
+      claudeGpt:    fixSection(body.quota.claudeGpt),
+      gemini:       fixSection(body.quota.gemini),
+    };
+  }
+
+  const { accountId, timestampUtc, claudeGpt } = body;
   if (!accountId || !timestampUtc || !claudeGpt) {
-    return res.status(400).json({ error: "accountId, timestampUtc, and claudeGpt are required" });
+    return res.status(400).json({
+      error: "accountId, timestampUtc (or capturedAt), and claudeGpt are required",
+    });
   }
   try {
-    store.upsertReading(req.body);
+    store.upsertReading(body);
     res.status(201).json({ ok: true });
   } catch (err) {
     console.error(err);
