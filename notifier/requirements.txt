@@ -1,0 +1,12 @@
+# Antigravity Quota Tracker — Notifier Requirements
+#
+# Core (stdlib only — no install needed):
+#   socket, struct, base64, json, re, threading, subprocess
+#
+# Recommended (significant performance + reliability improvements):
+requests>=2.28.0       # faster HTTP; falls back to urllib if absent
+psutil>=5.9.0          # enables launch + post_close triggers; gracefully absent otherwise
+
+# Notifications (at least one recommended):
+win10toast>=0.9        # Windows toast notifications
+# plyer>=2.1.0         # cross-platform alternative to win10toast

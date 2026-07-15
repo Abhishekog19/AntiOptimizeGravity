@@ -39,7 +39,55 @@ function tesseractAvailable() {
   }
 }
 
-// ── API key middleware ────────────────────────────────────────────────────────
+// ── Notifier heartbeat state (in-memory, not persisted) ──────────────────────
+// The notifier POSTs here every 15 s. The dashboard polls GET /api/status to
+// drive the coloured status dot: green (<30s), yellow (30-120s), red (>120s).
+let _heartbeat = {
+  receivedAt:    null,   // ISO timestamp of last heartbeat
+  status:        null,   // "live" | "offline" as reported by notifier
+  lastCaptureAt: null,   // ISO timestamp of last successful capture
+  triggerCount:  0,
+  lastTrigger:   null,
+  version:       null,
+};
+
+// ── POST /api/heartbeat — called by the notifier ──────────────────────────────
+app.post("/api/heartbeat", (req, res) => {
+  const body = req.body || {};
+  _heartbeat = {
+    receivedAt:    new Date().toISOString(),
+    status:        body.status        || "live",
+    lastCaptureAt: body.lastCaptureAt || _heartbeat.lastCaptureAt,
+    triggerCount:  body.triggerCount  ?? _heartbeat.triggerCount,
+    lastTrigger:   body.lastTrigger   || _heartbeat.lastTrigger,
+    version:       body.version       || _heartbeat.version,
+  };
+  res.json({ ok: true });
+});
+
+// ── GET /api/status — polled by the dashboard UI ──────────────────────────────
+app.get("/api/status", (_req, res) => {
+  const ageMs = _heartbeat.receivedAt
+    ? Date.now() - new Date(_heartbeat.receivedAt).getTime()
+    : Infinity;
+
+  // Connectivity classification based on heartbeat age:
+  //   live   → heartbeat received within the last 30 s
+  //   stale  → 30–120 s ago (notifier may be busy with a capture)
+  //   offline → >120 s or never received
+  const connectivity =
+    ageMs < 30_000  ? "live"    :
+    ageMs < 120_000 ? "stale"   :
+                      "offline";
+
+  res.json({
+    connectivity,
+    heartbeatAgeSeconds: isFinite(ageMs) ? Math.round(ageMs / 1000) : null,
+    ..._heartbeat,
+  });
+});
+
+
 const API_KEY = process.env.DASHBOARD_API_KEY || "";
 
 function requireApiKey(req, res, next) {

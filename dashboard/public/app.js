@@ -610,9 +610,53 @@ $$(".range-btn").forEach((btn) => {
   });
 });
 
+// ── Notifier status dot ───────────────────────────────────────────────────────
+
+const STATUS_POLL_INTERVAL = 15_000; // ms
+
+async function updateNotifierStatus() {
+  const dot   = $("#statusDot");
+  const label = $("#statusLabel");
+  if (!dot || !label) return;
+
+  try {
+    const res  = await fetch("/api/status");
+    const data = await res.json();
+    const conn = data.connectivity || "offline";  // "live" | "stale" | "offline"
+
+    // Update dot colour class
+    dot.className = `status-dot ${conn}`;
+
+    // Build label text
+    let labelText = conn;
+    if (conn === "live" && data.lastTrigger) {
+      labelText = `live · ${data.lastTrigger}`;
+    } else if (conn === "stale") {
+      const age = data.heartbeatAgeSeconds;
+      labelText = age ? `stale · ${age}s ago` : "stale";
+    } else if (conn === "offline") {
+      labelText = "notifier offline";
+    }
+    label.textContent = labelText;
+
+    // Rich tooltip
+    const lines = [`Notifier: ${conn}`];
+    if (data.lastCaptureAt) lines.push(`Last capture: ${new Date(data.lastCaptureAt).toLocaleTimeString()}`);
+    if (data.lastTrigger)   lines.push(`Trigger: ${data.lastTrigger}`);
+    if (data.version)       lines.push(`v${data.version}`);
+    $("#notifierStatus").title = lines.join("\n");
+
+  } catch {
+    $("#statusDot").className   = "status-dot offline";
+    $("#statusLabel").textContent = "dashboard offline";
+  }
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 checkSettings();
 loadAccounts();
-setInterval(loadAccounts, 60000);
-setInterval(checkSettings, 30000); // re-check tesseract availability periodically
+updateNotifierStatus();
+setInterval(loadAccounts,          60_000);
+setInterval(checkSettings,         30_000);
+setInterval(updateNotifierStatus,  STATUS_POLL_INTERVAL);

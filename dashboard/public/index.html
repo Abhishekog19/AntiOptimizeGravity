@@ -23,10 +23,16 @@
       <button id="tab-analytics" class="tab-btn"        role="tab" aria-selected="false" aria-controls="pane-analytics">Analytics</button>
     </nav>
     <div class="topbar-meta">
+      <!-- Notifier status dot: green=live, yellow=stale, red=offline -->
+      <div class="notifier-status" id="notifierStatus" title="Notifier status">
+        <span class="status-dot" id="statusDot"></span>
+        <span class="status-label" id="statusLabel">—</span>
+      </div>
       <span id="clock" class="mono"></span>
       <button id="refreshBtn" class="ghost-btn">Refresh</button>
     </div>
   </header>
+
 
   <!-- ── Tesseract warning banner (hidden when OK) ─────────────────────── -->
   <div id="tesseractWarning" class="settings-warning" hidden role="alert">
