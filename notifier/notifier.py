@@ -527,7 +527,8 @@ class CdpSession:
 
     def is_alive(self) -> bool:
         """Quick health check — returns True if the connection is working."""
-        return self.evaluate("1") == 1
+        v = self.evaluate("1")
+        return v == 1 or v == "1" or v is True
 
     def close(self) -> None:
         self._closed = True
@@ -580,6 +581,57 @@ def invalidate_settings_session() -> None:
         if _settings_session:
             _settings_session.close()
             _settings_session = None
+
+
+def ensure_settings_open(port: int = CDP_PORT) -> Optional[CdpSession]:
+    """
+    Ensure the Settings > Models panel is open and return a CdpSession.
+
+    If the settingsScreen CDP target already exists, returns a session to it.
+    If not, tries to navigate any editor page to the Settings URL via
+    history.pushState, waits up to 5 s for the target to appear, then
+    returns a session.  Returns None if all attempts fail.
+
+    Used by the launch and post_close triggers which need to open Settings
+    programmatically when the user may not have it open.
+    """
+    # Fast path: settings already open
+    existing = get_settings_session()
+    if existing:
+        return existing
+
+    log("  Settings target not found — attempting to open via CDP...", level="DEBUG")
+
+    # Find any editor page to navigate
+    pages = _get_all_page_targets(port)
+    editor = next(
+        (t for t in pages if "settingsScreen" not in t.get("url", "")), None
+    )
+    if not editor:
+        log("  No editor pages available to open Settings", level="WARN")
+        return None
+
+    # Navigate the editor page to the Settings URL
+    cdp_evaluate(editor, "history.pushState({}, '', '/?settingsScreen=Models')")
+    log("  Sent pushState to open Settings > Models", level="DEBUG")
+
+    # Wait up to 6 s for the settingsScreen target to appear
+    for _ in range(6):
+        time.sleep(1.0)
+        target = find_settings_target(port)
+        if target:
+            ws_url = target.get("webSocketDebuggerUrl")
+            if ws_url:
+                global _settings_session
+                with _session_lock:
+                    if _settings_session:
+                        _settings_session.close()
+                    _settings_session = CdpSession(ws_url)
+                log("  Settings target opened successfully", level="DEBUG")
+                return _settings_session
+
+    log("  Could not open Settings > Models within timeout", level="WARN")
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -965,11 +1017,13 @@ def run_capture_sequence(trigger: str, needs_refresh: bool = True,
     captured_at = datetime.datetime.now()
     log(f"== Capture [{trigger}] started ==================================")
     try:
-        # 1. Acquire Settings session
-        sess = session or get_settings_session()
+        # 1. Acquire Settings session.
+        #    For launch / post_close triggers the Settings panel may not be open
+        #    yet, so ensure_settings_open() tries to open it via CDP.
+        sess = session or ensure_settings_open()
         if sess is None:
-            log("  Settings > Models target not found — is it open?", level="ERROR")
-            toast("Capture failed: open Settings > Models in Antigravity")
+            log("  Settings > Models could not be opened", level="ERROR")
+            toast("Capture failed: could not open Settings > Models")
             return
 
         # 2. Read email from Account page
