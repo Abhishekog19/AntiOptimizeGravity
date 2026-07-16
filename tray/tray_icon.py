@@ -4,21 +4,26 @@ tray/tray_icon.py — System tray icon for Antigravity Quota Tracker
 Uses pystray + Pillow to draw a coloured circle icon whose colour reflects
 the worst-case quota status across all tracked accounts:
 
-  🟢 Green   All accounts have claude_weekly_pct > 30
-  🟡 Amber   At least one account ≤ 30%
-  🔴 Red     All accounts ≤ 10%  (or no accounts at all)
+  Green  All accounts have claude_weekly_pct > 30
+  Amber  At least one account <= 30%
+  Red    All accounts <= 10%  (or no accounts at all)
 
 Right-click menu:
-  Open Dashboard  → opens http://localhost:4300 in browser
-  Capture Now     → fires a manual capture
+  Open Dashboard  -> opens http://localhost:4300 in browser
+  Capture Now     -> fires a manual capture
   ──────────────
-  Quit            → graceful shutdown
+  Quit            -> graceful shutdown
 
-Left-click → opens / hides the QuotaPopup window.
+Left-click -> opens / hides the QuotaPopup window.
+
+NOTE for Windows users: if the icon is not visible in the taskbar,
+look for it in the overflow area (click the ^ arrow near the clock).
+Right-click the icon there and select "Show icon and notifications" to pin it.
 """
 
 from __future__ import annotations
 import sys
+import os
 import threading
 import time
 import webbrowser
@@ -27,7 +32,7 @@ from typing import Optional, Callable
 
 try:
     import pystray
-    from pystray import MenuItem as Item
+    from pystray import MenuItem as Item, Menu
     _HAS_PYSTRAY = True
 except ImportError:
     _HAS_PYSTRAY = False
@@ -44,7 +49,7 @@ log = logging.getLogger(__name__)
 _COLOR_GREEN  = (74,  222, 128, 255)   # #4ade80
 _COLOR_AMBER  = (251, 191,  36, 255)   # #fbbf24
 _COLOR_RED    = (248, 113, 113, 255)   # #f87171
-_COLOR_GREY   = (80,  80,   80, 255)   # fallback / starting state
+_COLOR_GREY   = (90,  90,   90, 255)   # starting / no data
 _ICON_SIZE    = 64
 
 
@@ -52,10 +57,16 @@ def _make_icon_image(color: tuple) -> "Image.Image":
     """Draw a coloured filled circle on a transparent background."""
     img  = Image.new("RGBA", (_ICON_SIZE, _ICON_SIZE), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    pad  = 6
+    pad  = 8
     draw.ellipse(
         [pad, pad, _ICON_SIZE - pad, _ICON_SIZE - pad],
         fill=color,
+    )
+    # Small white ring to make it pop on both light and dark taskbars
+    draw.ellipse(
+        [pad - 2, pad - 2, _ICON_SIZE - pad + 2, _ICON_SIZE - pad + 2],
+        outline=(255, 255, 255, 60),
+        width=1,
     )
     return img
 
@@ -85,14 +96,30 @@ def _compute_icon_color(accounts: list) -> tuple:
     return _COLOR_GREEN
 
 
+def _send_startup_toast() -> None:
+    """Show a Windows toast notifying user that the app is in the tray."""
+    try:
+        from win10toast import ToastNotifier
+        n = ToastNotifier()
+        n.show_toast(
+            "Antigravity Quota Tracker",
+            "Running in the system tray.\n"
+            "Look for the coloured dot near the clock (^ overflow if hidden).\n"
+            "Left-click = status popup | Right-click = menu",
+            duration=8,
+            threaded=True,
+        )
+    except Exception:
+        pass  # toast is non-critical
+
+
 # ── TrayIcon class ────────────────────────────────────────────────────────────
 
 class TrayIcon:
     """
     Wraps a pystray.Icon instance.
 
-    call run() to start blocking on the tray icon (must be on the main thread
-    on Windows/macOS for pystray to work correctly).
+    Call run() to start (blocks the main thread on Windows — required).
     """
 
     def __init__(
@@ -111,7 +138,7 @@ class TrayIcon:
 
     def run(self) -> None:
         """
-        Start the tray icon (blocking).  Call on the main thread.
+        Start the tray icon (blocking). Call on the main thread.
         Falls back to a plain sleep loop if pystray/Pillow are unavailable.
         """
         if not _HAS_PYSTRAY or not _HAS_PILLOW:
@@ -119,7 +146,6 @@ class TrayIcon:
                 "pystray or Pillow not installed — tray icon unavailable. "
                 "Dashboard still accessible at http://localhost:4300"
             )
-            # Keep main thread alive without a tray icon
             try:
                 while True:
                     time.sleep(1)
@@ -127,31 +153,47 @@ class TrayIcon:
                 pass
             return
 
-        menu = pystray.Menu(
-            Item("Open Dashboard",  self._on_open_dashboard, default=False),
-            Item("Capture Now",     self._on_capture_now),
-            pystray.Menu.SEPARATOR,
-            Item("Quit",            self._on_quit),
+        # Build menu — the default=True item is also triggered on left-click
+        # double-click on Windows (pystray behaviour)
+        menu = Menu(
+            Item(
+                "Status Window",          # also accessible via left-click on_activate
+                self._on_status_window,
+                default=False,
+            ),
+            Item(
+                "Open Dashboard",
+                self._on_open_dashboard,
+            ),
+            Item(
+                "Capture Now",
+                self._on_capture_now,
+            ),
+            Menu.SEPARATOR,
+            Item(
+                "Quit Antigravity Tracker",
+                self._on_quit,
+            ),
         )
+
+        initial_img = _make_icon_image(_COLOR_GREY)
 
         self._icon = pystray.Icon(
             name="antigravity-quota-tracker",
-            icon=_make_icon_image(_COLOR_GREY),
-            title="Antigravity Quota Tracker",
+            icon=initial_img,
+            title="Antigravity Quota Tracker — starting...",
             menu=menu,
+            on_activate=self._on_left_click,   # left-click handler (set in ctor)
         )
 
-        # Update icon colour in background
+        # Background: update icon colour + send startup toast
         threading.Thread(
-            target=self._icon_update_loop,
+            target=self._startup_sequence,
             daemon=True,
-            name="TrayIconUpdater",
+            name="TrayStartup",
         ).start()
 
-        # Left-click handler
-        self._icon.on_activate = self._on_left_click
-
-        log.info("Tray icon started")
+        log.info("Tray icon starting... (look for coloured dot near the clock, or ^ overflow)")
         self._icon.run()
 
     def update_icon(self, accounts: list) -> None:
@@ -162,14 +204,14 @@ class TrayIcon:
         if color == self._current_color:
             return
         self._current_color = color
+        status = {
+            _COLOR_GREEN: "All accounts healthy",
+            _COLOR_AMBER: "Some accounts running low",
+            _COLOR_RED:   "Accounts near-empty!",
+            _COLOR_GREY:  "No account data yet",
+        }.get(color, "")
         try:
-            self._icon.icon = _make_icon_image(color)
-            status = {
-                _COLOR_GREEN: "All accounts healthy",
-                _COLOR_AMBER: "Some accounts low",
-                _COLOR_RED:   "Accounts near-empty",
-                _COLOR_GREY:  "No data yet",
-            }.get(color, "")
+            self._icon.icon  = _make_icon_image(color)
             self._icon.title = f"Antigravity Quota Tracker — {status}"
         except Exception as exc:
             log.debug(f"Icon update error: {exc}")
@@ -184,11 +226,21 @@ class TrayIcon:
     # ── Menu handlers ─────────────────────────────────────────────────────────
 
     def _on_left_click(self, icon, item=None) -> None:
+        """Left-click handler - toggle the popup."""
         if self._popup_toggle:
             threading.Thread(
                 target=self._popup_toggle,
                 daemon=True,
                 name="PopupToggle",
+            ).start()
+
+    def _on_status_window(self, icon, item) -> None:
+        """Right-click 'Status Window' menu item."""
+        if self._popup_toggle:
+            threading.Thread(
+                target=self._popup_toggle,
+                daemon=True,
+                name="PopupToggleMenu",
             ).start()
 
     def _on_open_dashboard(self, icon, item) -> None:
@@ -207,14 +259,27 @@ class TrayIcon:
         if self._quit_fn:
             self._quit_fn()
 
-    # ── Background icon colour update ─────────────────────────────────────────
+    # ── Background sequences ─────────────────────────────────────────────────
+
+    def _startup_sequence(self) -> None:
+        """Run after the icon starts: send toast + begin colour-update loop."""
+        time.sleep(1.5)  # wait for icon to fully appear
+
+        # Toast
+        threading.Thread(target=_send_startup_toast, daemon=True).start()
+
+        # Update icon immediately with current account data
+        from state import app_state
+        self.update_icon(app_state.get_accounts())
+
+        # Colour update loop (every 30 s)
+        self._icon_update_loop()
 
     def _icon_update_loop(self) -> None:
         from state import app_state
         while True:
             try:
-                accounts = app_state.get_accounts()
-                self.update_icon(accounts)
+                self.update_icon(app_state.get_accounts())
             except Exception as exc:
-                log.debug(f"Icon update loop error: {exc}")
-            time.sleep(30)  # check every 30 s
+                log.debug(f"Icon update error: {exc}")
+            time.sleep(30)

@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-main.py — Antigravity Quota Tracker v4.0
+main.py - Antigravity Quota Tracker v4.0
 Single entry point: python main.py
 
 Architecture
-────────────
-  Thread 1  Flask server (daemon)      → http://localhost:4300
-  Thread 2  CDP watcher (daemon)       → 5 triggers, heartbeat
-  Main thread  pystray tray icon       → popup, menu
-  Tk thread  tkinter popup (daemon)    → started by QuotaPopup on first click
+------------
+  Thread 1  Flask server (daemon)      -> http://localhost:4300
+  Thread 2  CDP watcher (daemon)       -> 5 triggers, heartbeat
+  Main thread  pystray tray icon       -> popup, menu
+  Tk thread  tkinter popup (daemon)    -> started by QuotaPopup on first click
 
 All three layers share the app_state singleton (state.py) for live status.
+
+Windows startup: on first run, this script registers itself in the Windows
+startup registry so it starts automatically on login.
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ import signal
 from pathlib import Path
 
 # ── Ensure project root AND notifier dir are on sys.path ─────────────────────
-_ROOT = Path(__file__).parent
+_ROOT = Path(__file__).resolve().parent
 _NOTIFIER_DIR = _ROOT / "notifier"
 for _p in [str(_ROOT), str(_NOTIFIER_DIR)]:
     if _p not in sys.path:
@@ -43,6 +46,9 @@ def _load_env(path: Path) -> None:
             os.environ[k] = v.strip().strip('"').strip("'")
 
 _load_env(_ROOT / "notifier" / ".env")
+
+# ── Also load dashboard/.env for TESSERACT_PATH etc ──────────────────────────
+_load_env(_ROOT / "dashboard" / ".env")
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 _LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -68,6 +74,49 @@ if VERBOSE:
 from state import app_state
 
 
+# ── Windows startup auto-registration ────────────────────────────────────────
+
+def _register_windows_startup() -> None:
+    """
+    Add this script (or .exe) to Windows startup registry so it runs on login.
+    Silently skips on non-Windows or if already registered.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        app_name = "AntigravityQuotaTracker"
+
+        # Build the startup command
+        if getattr(sys, "frozen", False):
+            # Running as PyInstaller .exe
+            cmd = f'"{sys.executable}"'
+        else:
+            # Running as python script
+            cmd = f'"{sys.executable}" "{str(_ROOT / "main.py")}"'
+
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, key_path,
+            0, winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE
+        )
+
+        # Check if already registered with same command
+        try:
+            existing, _ = winreg.QueryValueEx(key, app_name)
+            if existing == cmd:
+                winreg.CloseKey(key)
+                return  # already registered correctly
+        except FileNotFoundError:
+            pass  # not yet registered
+
+        winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, cmd)
+        winreg.CloseKey(key)
+        log.info(f"Registered in Windows startup: {cmd}")
+    except Exception as exc:
+        log.debug(f"Could not register startup: {exc}")
+
+
 # ── Flask server thread ────────────────────────────────────────────────────────
 
 def _start_flask() -> None:
@@ -83,9 +132,8 @@ def _start_watcher() -> None:
     # Small delay to let Flask start first (so heartbeats land correctly)
     time.sleep(1.5)
     try:
-        # notifier/ is on sys.path so we import 'notifier' (the module file) directly
         from notifier import run_watcher
-        log.info("Starting CDP watcher (5 triggers active)")
+        log.info("Starting CDP watcher (5 triggers + debounce=2s)")
         run_watcher()
     except Exception as exc:
         log.error(f"CDP watcher crashed: {exc}", exc_info=True)
@@ -98,7 +146,7 @@ _shutdown_event = threading.Event()
 
 
 def _quit() -> None:
-    log.info("Quit requested — shutting down…")
+    log.info("Quit requested - shutting down...")
     _shutdown_event.set()
     sys.exit(0)
 
@@ -112,7 +160,14 @@ def main() -> None:
     log.info(f"Mode: {mode}  |  Dashboard: http://localhost:4300")
     log.info("-" * 50)
 
-    app_state.log("Antigravity Quota Tracker starting…", app_state.LEVEL_INFO)
+    app_state.log("Starting...", app_state.LEVEL_INFO)
+
+    # ── Auto-register in Windows startup ─────────────────────────────────────
+    threading.Thread(
+        target=_register_windows_startup,
+        daemon=True,
+        name="StartupReg",
+    ).start()
 
     # ── Thread 1: Flask ───────────────────────────────────────────────────────
     flask_thread = threading.Thread(
@@ -130,13 +185,14 @@ def main() -> None:
     )
     watcher_thread.start()
 
-    # ── Seed account cache from DB (so popup has data immediately) ────────────
+    # ── Seed account cache from DB immediately ────────────────────────────────
     def _seed_accounts():
-        time.sleep(2.0)
+        time.sleep(1.0)   # give Flask a moment to init
         try:
             from server.db import list_accounts_with_latest
-            app_state.set_accounts(list_accounts_with_latest())
-            log.debug("Account cache seeded from DB")
+            accounts = list_accounts_with_latest()
+            app_state.set_accounts(accounts)
+            log.info(f"Account cache seeded: {len(accounts)} account(s) in DB")
         except Exception as exc:
             log.warning(f"Could not seed account cache: {exc}")
     threading.Thread(target=_seed_accounts, daemon=True, name="AccountSeed").start()
@@ -162,8 +218,10 @@ def main() -> None:
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, lambda s, f: _quit())
 
-    log.info("Tray icon starting (main thread)…")
-    app_state.log("Ready — tray icon active", app_state.LEVEL_OK)
+    log.info("Tray icon starting...")
+    log.info(">>> Look for the coloured dot in the system tray (near the clock)")
+    log.info(">>> If hidden: click the ^ arrow in the taskbar to find it")
+    app_state.log("Ready - tray active", app_state.LEVEL_OK)
 
     # tray.run() blocks the main thread (required by pystray on Windows/macOS)
     tray.run()

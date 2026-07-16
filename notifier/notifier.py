@@ -122,7 +122,7 @@ def _cfg(key: str, default):
 
 CDP_PORT           = _cfg("CDP_PORT",                  9222)
 POLL_INTERVAL      = _cfg("POLL_INTERVAL_SECONDS",     2)
-DEBOUNCE           = _cfg("DEBOUNCE_SECONDS",          30)
+DEBOUNCE           = _cfg("DEBOUNCE_SECONDS",          2)   # 2s: re-arm quickly after capture
 DASHBOARD_URL      = _cfg("DASHBOARD_URL",             "http://localhost:4300")
 DASHBOARD_API_KEY  = _cfg("DASHBOARD_API_KEY",         "")
 LOG_LEVEL          = _cfg("LOG_LEVEL",                 "INFO").upper()
