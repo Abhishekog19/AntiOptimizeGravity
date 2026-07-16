@@ -281,6 +281,6 @@ def run_flask(host: str = "0.0.0.0", port: int = PORT, debug: bool = False) -> N
     import logging as _logging
     _logging.getLogger("werkzeug").setLevel(_logging.WARNING)
 
-    app_state.log("Flask dashboard starting on port 4300…", app_state.LEVEL_INFO)
+    app_state.log("Flask dashboard starting on port 4300...", app_state.LEVEL_INFO)
     app_state.set_flask_ready(True)
     app.run(host=host, port=port, debug=debug, use_reloader=False)

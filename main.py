@@ -22,10 +22,12 @@ import logging
 import signal
 from pathlib import Path
 
-# ── Ensure project root is on sys.path ────────────────────────────────────────
+# ── Ensure project root AND notifier dir are on sys.path ─────────────────────
 _ROOT = Path(__file__).parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+_NOTIFIER_DIR = _ROOT / "notifier"
+for _p in [str(_ROOT), str(_NOTIFIER_DIR)]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 # ── Load .env from notifier/.env (same as before) ────────────────────────────
 def _load_env(path: Path) -> None:
@@ -71,7 +73,7 @@ from state import app_state
 def _start_flask() -> None:
     from server.flask_app import run_flask
     port = int(os.environ.get("PORT", "4300"))
-    log.info(f"Starting Flask dashboard → http://localhost:{port}")
+    log.info(f"Starting Flask dashboard on http://localhost:{port}")
     run_flask(host="0.0.0.0", port=port, debug=False)
 
 
@@ -81,8 +83,8 @@ def _start_watcher() -> None:
     # Small delay to let Flask start first (so heartbeats land correctly)
     time.sleep(1.5)
     try:
-        # Make notifier inherit the DRY_RUN/VERBOSE flags from argv
-        from notifier.notifier import run_watcher
+        # notifier/ is on sys.path so we import 'notifier' (the module file) directly
+        from notifier import run_watcher
         log.info("Starting CDP watcher (5 triggers active)")
         run_watcher()
     except Exception as exc:
@@ -104,11 +106,11 @@ def _quit() -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    log.info("━" * 50)
+    log.info("-" * 50)
     log.info("Antigravity Quota Tracker v4.0")
     mode = "DRY-RUN" if DRY_RUN else "LIVE"
     log.info(f"Mode: {mode}  |  Dashboard: http://localhost:4300")
-    log.info("━" * 50)
+    log.info("-" * 50)
 
     app_state.log("Antigravity Quota Tracker starting…", app_state.LEVEL_INFO)
 
@@ -142,7 +144,7 @@ def main() -> None:
     # ── Wire up tray icon + popup ─────────────────────────────────────────────
     from tray.tray_icon import TrayIcon
     from tray.popup import QuotaPopup
-    from notifier.notifier import fire_capture
+    from notifier import fire_capture
 
     def _manual_capture():
         fire_capture("manual_tray", needs_refresh=True)
