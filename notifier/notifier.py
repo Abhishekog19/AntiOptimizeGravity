@@ -71,6 +71,18 @@ try:
 except ImportError:
     _HAS_REQUESTS = False
 
+# ── AppState (optional — graceful if run standalone) ──────────────────────────
+try:
+    import sys as _sys
+    _project_root = str(Path(__file__).parent.parent)
+    if _project_root not in _sys.path:
+        _sys.path.insert(0, _project_root)
+    from state import app_state as _app_state
+    _HAS_APP_STATE = True
+except ImportError:
+    _HAS_APP_STATE = False
+    _app_state = None  # type: ignore
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1015,6 +1027,8 @@ def run_capture_sequence(trigger: str, needs_refresh: bool = True,
     """
     _capture_state["capturing"] = True
     captured_at = datetime.datetime.now()
+    if _HAS_APP_STATE and _app_state:
+        _app_state.set_capturing(True, trigger)
     log(f"== Capture [{trigger}] started ==================================")
     try:
         # 1. Acquire Settings session.
@@ -1068,14 +1082,23 @@ def run_capture_sequence(trigger: str, needs_refresh: bool = True,
         _hb["last_trigger"]     = trigger
         _capture_state["last_capture_ts"] = time.time()
 
-        # 8. Toast summary
+        # 8. Update shared state
+        if _HAS_APP_STATE and _app_state:
+            _app_state.set_capture_complete(trigger, email, ok)
+            try:
+                from server.db import list_accounts_with_latest
+                _app_state.set_accounts(list_accounts_with_latest())
+            except Exception:
+                pass
+
+        # 9. Toast summary
         lines = []
         if cg:
             lines.append(f"Claude/GPT:  {cg.get('weeklyPct')}% weekly / {cg.get('fiveHourPct')}% 5hr")
         if gem:
             lines.append(f"Gemini:      {gem.get('weeklyPct')}% weekly / {gem.get('fiveHourPct')}% 5hr")
         if not ok:
-            lines.append("(!) Dashboard POST failed — check server.js is running")
+            lines.append("(!) Dashboard POST failed")
         toast(
             "\n".join(lines) or "Quota captured successfully",
             title=f"[{trigger}] Quota saved — {email}",
@@ -1084,6 +1107,8 @@ def run_capture_sequence(trigger: str, needs_refresh: bool = True,
     except Exception as exc:
         log(f"  Capture error: {exc}", level="ERROR")
         toast(f"Capture error ({trigger}): {exc}")
+        if _HAS_APP_STATE and _app_state:
+            _app_state.set_capture_error(trigger, str(exc))
     finally:
         _capture_state["capturing"] = False
         log(f"== Capture [{trigger}] finished =================================")
@@ -1101,6 +1126,18 @@ def _fire_capture(trigger: str, needs_refresh: bool = True) -> None:
         daemon=True,
         name=f"Capture-{trigger}",
     ).start()
+
+
+def fire_capture(trigger: str = "manual_tray", needs_refresh: bool = True) -> None:
+    """
+    Public wrapper around _fire_capture() for external callers
+    (tray popup, tray menu, main.py).
+
+    trigger       Identifier shown in the activity log.
+    needs_refresh True = click the Refresh button before reading quota.
+                  All five CDP triggers except manual_refresh use True.
+    """
+    _fire_capture(trigger, needs_refresh)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1396,6 +1433,19 @@ def main() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+
+def run_watcher() -> None:
+    """
+    Public entry point for the CDP watcher loop.
+    Call in a daemon thread from main.py:
+
+        threading.Thread(target=run_watcher, daemon=True).start()
+
+    Identical to calling main() — extracted so main.py can import and
+    use it without spawning a subprocess.
+    """
+    main()
+
 
 if __name__ == "__main__":
     try:
