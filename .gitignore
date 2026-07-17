@@ -18,7 +18,7 @@ __pycache__/
 
 # Ignore SQLite / database files
 *.db
-
+*.env
 # Runtime data
 pids
 *.pid
