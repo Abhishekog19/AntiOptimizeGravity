@@ -8,6 +8,12 @@ lerna-debug.log*
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+# Ignore Python bytecode cache
+__pycache__/
+*.py[cod]
+
+# Ignore SQLite / database files
+*.db
 
 # Runtime data
 pids
