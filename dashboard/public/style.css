@@ -816,7 +816,8 @@ kbd {
 
 /* ── Responsive ───────────────────────────────────────────────────────────── */
 
-@media (max-width: 768px) {
+/* ── 900px and below: medium (cards + basic analytics, no history graph) ──── */
+@media (max-width: 900px) {
   .topbar {
     flex-wrap: wrap;
     padding-left: 20px;
@@ -837,9 +838,61 @@ kbd {
   .recommendation { flex-direction: column; align-items: flex-start; gap: 6px; }
 
   .settings-warning { padding-left: 20px; padding-right: 20px; }
+
+  /* Hide analytics chart (line graph) at medium size */
+  .analytics-chart-card { display: none; }
+
+  /* Stat cards: 2 columns instead of auto */
+  .analytics-meta-row { grid-template-columns: repeat(2, 1fr); }
 }
 
-@media (max-width: 480px) {
+/* ── 500px and below: compact (cards only, no analytics, minimal topbar) ──── */
+@media (max-width: 500px) {
+  /* Hide everything except the accounts pane and its topbar */
+  .tab-nav { display: none; }
+
+  /* When on accounts pane: hide analytics toolbar, stat cards, chart */
+  .analytics-toolbar,
+  .analytics-meta-row,
+  .analytics-chart-card,
+  .efficiency-list { display: none; }
+
+  /* Hide detail overlay close-on-small (overlay still works on click) */
+  .detail-panel { width: 96vw; padding: 20px 16px; }
+
+  /* Compact topbar */
+  .topbar {
+    padding: 12px 16px;
+    gap: 8px;
+  }
+  .wordmark { font-size: 16px; }
+  /* Hide the status label text, keep just the dot */
+  .status-label { display: none; }
+  /* Hide capture & settings nav buttons */
+  .ghost-btn { display: none; }
+  /* Hide recommendation banner */
+  .recommendation { display: none; }
+  /* Hide settings warning link */
+  .settings-warning-link { display: none; }
+
+  /* Pane padding */
+  .pane {
+    padding: 12px 12px 60px;
+    max-width: 100%;
+  }
+
+  /* Full-width single column grid */
+  .grid { grid-template-columns: 1fr; gap: 12px; }
+
+  /* Card: tighter padding */
+  .card { padding: 16px; border-radius: 12px; }
+  .card-name { font-size: 15px; }
+  .recommendation { display: none; }
+
+  /* Heatmap: 2 columns */
   .heatmap-grid { grid-template-columns: repeat(2, 1fr); }
   .analytics-meta-row { grid-template-columns: 1fr; }
+
+  /* Capture layout: single column */
+  .capture-layout { grid-template-columns: 1fr; }
 }

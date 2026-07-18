@@ -74,14 +74,20 @@ Dashboard is at **http://localhost:4300**.
 
 | # | Trigger | When | Refresh before read? |
 |---|---------|------|----------------------|
-| 1 | **launch** | Antigravity process appears | ✅ Yes (3 s wait) |
-| 2 | **profile_menu** | Profile dropdown opens (Sign Out button visible) | ✅ Yes (3 s wait) |
-| 3 | **sign_out_dialog** | Sign-out confirmation dialog appears | ✅ Yes (3 s wait) |
-| 4 | **manual_refresh** | User clicks Refresh in Settings → Models | ❌ No (data already fresh) |
-| 5 | **post_close** | Antigravity process exits | ✅ Yes (3 s wait, after relaunch) |
-| 6 | **manual_tray** | Tray popup "Capture Now" button | ✅ Yes (3 s wait) |
+| 1 | **launch** | Antigravity process appears | Yes (3 s wait) |
+| 2 | **profile_menu** | Profile dropdown opens | Yes (3 s wait) |
+| 3 | **sign_out_dialog** | Sign-out confirmation dialog appears | Yes (3 s wait) |
+| 4 | **manual_refresh** | User clicks Refresh in Settings > Models | No (data already fresh) |
+| 5 | **safety_net** | Every 20 minutes while Antigravity is open | Yes (3 s wait) |
+| 6 | **manual_tray** | Tray menu "Capture Now" button | Yes (3 s wait) |
 
-Trigger 4 is the only one that skips the Refresh step because the user just clicked it — the data is already the most current available.
+Trigger 4 is the only one that skips the Refresh step — the user just clicked it,
+so the data is already fresh.
+
+> **Tip for most accurate data:** use the Sign Out flow rather than closing Antigravity
+> directly. If you close Antigravity without signing out, the tracker shows a notification
+> asking you to reopen the app. The safety-net timer (every 20 minutes) means the worst-case
+> data loss on a direct-close is ~20 minutes of session data, not the entire session.
 
 ---
 
@@ -93,8 +99,11 @@ Trigger 4 is the only one that skips the Refresh step because the user just clic
 | 🟡 Amber | At least one account ≤ 30% weekly |
 | 🔴 Red   | All accounts ≤ 10% weekly (or no accounts yet) |
 
-**Left-click** → opens the status popup (account cards + activity log + Capture Now button)  
-**Right-click** → menu: Open Dashboard, Capture Now, Quit
+**Left-click** -> opens the dashboard in a native window (PyWebView / WebView2)  
+**Right-click** -> menu: Open Dashboard, Capture Now, Quit
+
+When Antigravity closes without signing out, a system notification appears:
+> "Antigravity closed — open it again to capture your final quota reading"
 
 ---
 
@@ -118,8 +127,9 @@ All settings in `notifier/.env` (copy from `notifier/config.example.env`):
 |-----|---------|-------------|
 | `CDP_PORT` | `9222` | Chrome DevTools Protocol port |
 | `POLL_INTERVAL_SECONDS` | `2` | How often to check for triggers |
-| `DEBOUNCE_SECONDS` | `30` | Min seconds between captures |
-| `DASHBOARD_URL` | `http://localhost:4300` | Dashboard URL (points to embedded Flask) |
+| `DEBOUNCE_SECONDS` | `2` | Min seconds between captures |
+| `SAFETY_NET_INTERVAL` | `1200` | Seconds between safety-net captures (default 20 min) |
+| `DASHBOARD_URL` | `http://localhost:4300` | Dashboard URL |
 | `DASHBOARD_API_KEY` | *(empty)* | Optional API key for remote access |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARN` / `ERROR` |
 | `TESSERACT_PATH` | `tesseract` | Path to Tesseract binary (for OCR captures) |
@@ -140,15 +150,19 @@ python build.py
 
 ### "Can't get data that was never rendered"
 
-Antigravity only fetches quota from its servers **when the Settings → Models panel is rendered**. There is no background sync and no API endpoint this tool can query directly.
+Antigravity only fetches quota from its servers **when the Settings > Models panel is rendered**.
+There is no background sync and no direct API endpoint.
 
-### Settings panel flash on launch/post_close triggers
+### Closing Antigravity without signing out
 
-Triggers 1 (launch) and 5 (post_close) open the Settings panel programmatically via CDP. The notifier attempts to minimise the window using `Browser.setWindowBounds`, but this only works if Antigravity's Electron build exposes the `Browser` CDP domain. If it doesn't, the Settings panel will be **briefly visible** before being dismissed.
+For most accurate data, use the Sign Out flow rather than closing Antigravity directly.
+When Antigravity closes without sign-out, the tracker notifies you to reopen it for a final
+capture. The safety-net timer (every 20 minutes by default) limits the worst-case data loss
+to ~20 minutes of usage, not the entire session.
 
-### psutil required for launch and post_close triggers
+### psutil required for launch and close triggers
 
-Without `psutil`, triggers 1 and 5 are silently disabled. Install with:
+Without `psutil`, process-detection triggers are silently disabled. Install with:
 ```bash
 pip install psutil
 ```
@@ -167,17 +181,16 @@ antigravity-quota-tracker/
 │   ├── db.py                  # SQLite queries (replaces dashboard/db.js)
 │   └── ocr.py                 # OCR processing (replaces dashboard/ocr.js)
 ├── tray/
-│   ├── tray_icon.py           # pystray system tray icon
-│   └── popup.py               # tkinter status popup
+│   └── tray_icon.py           # pystray tray + PyWebView window manager
 ├── notifier/
-│   ├── notifier.py            # CDP watcher (5 triggers, heartbeat)
+│   ├── notifier.py            # CDP watcher (5 triggers + safety net)
 │   ├── config.example.env     # Configuration template
 │   └── requirements.txt       # Python dependencies
 ├── dashboard/
-│   └── public/                # Web dashboard (HTML/CSS/JS — unchanged)
+│   └── public/                # Web dashboard (HTML/CSS/JS)
 │   └── data/                  # SQLite database (quota.db)
 ├── scripts/
-│   └── setup-windows.ps1      # Patches Antigravity shortcuts (optional)
+│   └── setup-windows.ps1      # Patches Antigravity shortcuts (one-time)
 ├── README.md
 └── LICENSE
 ```

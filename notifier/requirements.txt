@@ -1,23 +1,23 @@
 # Antigravity Quota Tracker — Requirements
 #
-# Core (stdlib only — no install needed):
-#   socket, struct, base64, json, re, threading, subprocess, sqlite3, tkinter
-#
 # Install all with:
 #   pip install -r notifier/requirements.txt
 
 # ── CDP watcher (performance + reliability) ────────────────────────────────────
 requests>=2.28.0       # faster HTTP; falls back to urllib if absent
-psutil>=5.9.0          # enables launch + post_close triggers; gracefully absent otherwise
+psutil>=5.9.0          # enables launch / close triggers; gracefully absent otherwise
 
 # ── Embedded dashboard server (replaces Node.js/Express) ──────────────────────
 flask>=3.0.0           # dashboard HTTP server (runs in daemon thread)
 
 # ── System tray icon ────────────────────────────────────────────────────────────
 pystray>=0.19.5        # cross-platform system tray icon
-pillow>=10.0.0         # required by pystray for icon rendering;
-                       # also used for OCR image pre-processing
+pillow>=10.0.0         # icon rendering + OCR image pre-processing
 
-# ── Notifications (at least one recommended) ───────────────────────────────────
-win10toast>=0.9        # Windows toast notifications
-# plyer>=2.1.0         # cross-platform alternative to win10toast
+# ── Native dashboard window ────────────────────────────────────────────────────
+pywebview>=4.4.0       # native window backed by WebView2 (Win) / WKWebView (Mac)
+                       # No extra browser install needed on Win 10/11 or macOS.
+
+# ── Notifications ──────────────────────────────────────────────────────────────
+win10toast>=0.9        # Windows toast notifications (Windows-only)
+# plyer>=2.1.0         # cross-platform alternative (uncomment for Mac/Linux)

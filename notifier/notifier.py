@@ -123,13 +123,14 @@ def _cfg(key: str, default):
 CDP_PORT           = _cfg("CDP_PORT",                  9222)
 POLL_INTERVAL      = _cfg("POLL_INTERVAL_SECONDS",     2)
 DEBOUNCE           = _cfg("DEBOUNCE_SECONDS",          2)   # 2s: re-arm quickly after capture
+SAFETY_NET_INTERVAL = _cfg("SAFETY_NET_INTERVAL",      1200) # 20 min
 DASHBOARD_URL      = _cfg("DASHBOARD_URL",             "http://localhost:4300")
 DASHBOARD_API_KEY  = _cfg("DASHBOARD_API_KEY",         "")
 LOG_LEVEL          = _cfg("LOG_LEVEL",                 "INFO").upper()
 
 HEARTBEAT_INTERVAL = 15    # seconds between heartbeat POSTs
-RELAUNCH_TIMEOUT   = 30    # seconds to wait for CDP after relaunching Antigravity
-RELAUNCH_SETTLE    = 3     # seconds to wait for UI to settle after relaunch
+RELAUNCH_TIMEOUT   = 30    # kept for CDP wait helper (used by ensure_settings_open)
+RELAUNCH_SETTLE    = 3     # seconds to wait for UI to settle after launch
 
 DRY_RUN = "--dry-run" in sys.argv
 VERBOSE  = "--verbose" in sys.argv or LOG_LEVEL == "DEBUG"
@@ -249,14 +250,35 @@ def _get_all_page_targets(port: int = CDP_PORT) -> list:
         return []
 
 
+def _is_settings_panel(t: dict) -> bool:
+    """
+    Return True if a CDP target IS the floating Settings panel (not the main editor).
+
+    Root-cause discovery: Antigravity IDE sets ALL page target URLs to
+    'vscode-file://vscode-app/?settingsScreen=...' (including the main editor
+    window when it opens Settings in the same window).  The ONLY reliable
+    way to identify the actual floating Settings panel is by its CDP title,
+    which is exactly 'Settings'.  The main editor window always has the
+    filename + 'Antigravity IDE' in the title.
+
+    We fall back to URL-contains if the title is empty (headless tests etc).
+    """
+    title = t.get("title", "")
+    url   = t.get("url", "")
+    if title:
+        return title.strip() == "Settings"
+    # Fallback: URL-based (original behaviour)
+    return "settingsScreen" in url
+
+
 def find_settings_target(port: int = CDP_PORT) -> Optional[dict]:
-    """Return the CDP target for the Antigravity Settings page, or None."""
+    """Return the CDP target for the Antigravity Settings panel, or None."""
     try:
         targets = _http_get_json(f"http://localhost:{port}/json")
     except Exception:
         return None
     for t in targets:
-        if t.get("type") == "page" and "settingsScreen" in t.get("url", ""):
+        if t.get("type") == "page" and _is_settings_panel(t):
             return t
     return None
 
@@ -757,48 +779,76 @@ _CHEAP_TRIGGER_JS = r"""
 })()
 """
 
-# Observer injection: installed once into the settingsScreen target.
-# Watches for percentage-text mutations (the user clicked Refresh in the UI).
+# Observer injection: installed into the settingsScreen target on EVERY new connection.
+# Uses a timestamp (Date.now()) so the watcher can detect CHANGES, not just presence.
+# The guard window.__quotaObserverInstalled prevents double-injection on same page load.
 _OBSERVER_JS = r"""
 (function() {
-    if (window.__ag_observer_installed) return 'already';
-    window.__ag_observer_installed = true;
-    window.__ag_manual_refresh     = false;
-    new MutationObserver(function(mutations) {
-        var pctChanged = mutations.some(function(m) {
-            var nodes = Array.from(m.addedNodes).concat(Array.from(m.removedNodes));
-            return nodes.some(function(n) {
-                return /\d{1,3}%/.test(n.textContent || '');
-            });
-        });
-        if (pctChanged) window.__ag_manual_refresh = true;
-    }).observe(document.body, {
-        childList: true, subtree: true, characterData: true
+    if (window.__quotaObserverInstalled) return 'already';
+    window.__quotaObserverInstalled = true;
+    window.__quotaUpdated = 0;
+    var observer = new MutationObserver(function() {
+        var text = document.body.innerText;
+        if (text.indexOf('Claude and GPT models') !== -1 && text.indexOf('%') !== -1) {
+            window.__quotaUpdated = Date.now();
+        }
+    });
+    observer.observe(document.body, {
+        subtree: true,
+        childList: true,
+        characterData: true
     });
     return 'installed';
 })()
 """
 
-# Cheap check for the manual-refresh flag set by the observer.
-# Runs on the settingsScreen session, not editor targets.
-_MANUAL_CHECK_JS = r"""
-(function() {
-    if (!window.__ag_observer_installed) return null;
-    if (window.__ag_manual_refresh) {
-        window.__ag_manual_refresh = false;
-        return 'manual_refresh';
-    }
-    return null;
-})()
-"""
+# Read and reset the mutation timestamp (returns integer ms, or 0 if not triggered).
+_MUTATION_FLAG_JS = "(function(){ var v = window.__quotaUpdated || 0; return v; })()"
 
-# Click the last Refresh button (= Models section, not MCP section above it).
+# Click the last Refresh button (= Models section).
 _REFRESH_JS = r"""
 (function() {
     var btns = Array.from(document.querySelectorAll('button'))
         .filter(function(b) { return b.innerText.trim() === 'Refresh'; });
     if (btns.length) { btns[btns.length - 1].click(); return true; }
     return false;
+})()
+"""
+
+# Cheap short-text query for trigger detection on editor pages.
+# Returns first 2000 chars of body text — enough to detect profile menu / dialog.
+_SHORT_TEXT_JS = "document.body ? document.body.innerText.slice(0, 2000) : ''"
+
+# Comprehensive trigger-detection JS for the main workbench window.
+# Returns 'profile_menu', 'sign_out_dialog', or null.
+# Checks multiple string patterns so it works regardless of Antigravity version.
+_TRIGGER_DETECT_JS = r"""
+(function() {
+    if (!document.body) return null;
+    var body = document.body;
+    var text = body.innerText || '';
+
+    // ── Profile menu: check interactive elements for 'Sign Out' ──────────
+    // This appears in the profile dropdown when the user clicks the avatar.
+    var selectors = 'button, li, a, [role="menuitem"], [role="option"], .action-label';
+    var els = body.querySelectorAll(selectors);
+    for (var i = 0; i < els.length; i++) {
+        var t = (els[i].innerText || '').trim();
+        if (t === 'Sign Out' || t === 'Sign out') return 'profile_menu';
+    }
+
+    // Also check body text for unique profile-menu strings
+    if (text.indexOf('Manage Trusted Extensions') > -1) return 'profile_menu';
+    if (text.indexOf('Turn on Cloud Changes') > -1)    return 'profile_menu';
+    if (text.indexOf('Export Profile')         > -1)   return 'profile_menu';
+    if (text.indexOf('Import Profile')         > -1)   return 'profile_menu';
+
+    // ── Sign-out confirmation dialog ──────────────────────────────────────
+    if (text.indexOf('Sign out of') > -1)               return 'sign_out_dialog';
+    if (text.indexOf('Do you want to sign out') > -1)   return 'sign_out_dialog';
+    if (text.indexOf('All local changes will be lost') > -1) return 'sign_out_dialog';
+
+    return null;
 })()
 """
 
@@ -1006,9 +1056,12 @@ def read_email(sess: CdpSession) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _capture_state = {
-    "capturing":       False,
     "last_capture_ts": 0.0,   # time.time() of last successful capture (for debounce)
 }
+
+# Bug B fix: single non-blocking lock — only ONE capture thread may run at a time.
+# _fire_capture() calls acquire(blocking=False); if it fails it logs + returns.
+_capture_lock = threading.Lock()
 
 
 def run_capture_sequence(trigger: str, needs_refresh: bool = True,
@@ -1025,7 +1078,7 @@ def run_capture_sequence(trigger: str, needs_refresh: bool = True,
     session        Pre-existing CdpSession (for post_close relaunch).
                    If None, one is obtained from get_settings_session().
     """
-    _capture_state["capturing"] = True
+    # Lock is already held by our caller (_fire_capture); nothing to set here.
     captured_at = datetime.datetime.now()
     if _HAS_APP_STATE and _app_state:
         _app_state.set_capturing(True, trigger)
@@ -1110,22 +1163,34 @@ def run_capture_sequence(trigger: str, needs_refresh: bool = True,
         if _HAS_APP_STATE and _app_state:
             _app_state.set_capture_error(trigger, str(exc))
     finally:
-        _capture_state["capturing"] = False
+        # _capture_lock is released by the wrapper in _fire_capture().
         log(f"== Capture [{trigger}] finished =================================")
 
 
 def _fire_capture(trigger: str, needs_refresh: bool = True) -> None:
-    """Debounce check then launch capture in a daemon thread."""
+    """
+    Debounce guard + single-capture-at-a-time enforcement, then launch in a
+    daemon thread.
+
+    Bug A fix: debounce uses time.time() delta (unchanged).
+    Bug B fix: _capture_lock.acquire(blocking=False) ensures only one capture
+               thread runs at a time.  A second concurrent trigger is logged
+               and dropped — not queued — so the watcher stays responsive.
+    """
     elapsed = time.time() - _capture_state["last_capture_ts"]
     if elapsed < DEBOUNCE:
         log(f"Trigger '{trigger}' debounced ({elapsed:.0f}s < {DEBOUNCE}s)", level="DEBUG")
         return
-    threading.Thread(
-        target=run_capture_sequence,
-        kwargs={"trigger": trigger, "needs_refresh": needs_refresh},
-        daemon=True,
-        name=f"Capture-{trigger}",
-    ).start()
+    if not _capture_lock.acquire(blocking=False):
+        log(f"Capture already in progress — skipping '{trigger}' trigger")
+        return
+    # Lock acquired here; released in the thread's finally block.
+    def _run():
+        try:
+            run_capture_sequence(trigger=trigger, needs_refresh=needs_refresh)
+        finally:
+            _capture_lock.release()
+    threading.Thread(target=_run, daemon=True, name=f"Capture-{trigger}").start()
 
 
 def fire_capture(trigger: str = "manual_tray", needs_refresh: bool = True) -> None:
@@ -1219,7 +1284,9 @@ def _open_settings_after_relaunch(port: int = CDP_PORT) -> Optional[CdpSession]:
             return CdpSession(ws_url)
 
     # Try navigating an editor target to the Settings URL
-    editor = next((t for t in targets if "settingsScreen" not in t.get("url", "")), None)
+    targets = _get_all_page_targets(CDP_PORT)
+    # Use the main editor window (not the Settings panel) to push the URL change
+    editor = next((t for t in targets if not _is_settings_panel(t)), None)
     if editor:
         cdp_evaluate(editor, "history.pushState({}, '', '/?settingsScreen=Models')")
         time.sleep(2)
@@ -1309,120 +1376,255 @@ def relaunch_and_capture(exe_path: str, original_args: list) -> None:
 
 def ensure_observer(sess: CdpSession) -> None:
     """
-    Inject the MutationObserver into the settingsScreen target (idempotent).
-    The observer sets window.__ag_manual_refresh when percentage text changes,
-    which indicates the user clicked Refresh in the Settings > Models UI.
+    Inject the MutationObserver into the settingsScreen target.
+    Uses window.__quotaObserverInstalled guard to prevent double-injection.
+    Called on EVERY new CDP connection (not just startup) so Settings page
+    reloads don't lose the observer.
     """
-    # Always re-check the window variable (handles page reloads)
-    installed = sess.evaluate("!!window.__ag_observer_installed")
+    installed = sess.evaluate("!!window.__quotaObserverInstalled")
     if not installed:
         result = sess.evaluate(_OBSERVER_JS)
         log(f"MutationObserver: {result}", level="DEBUG")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main polling loop
+# Main polling loop (v4 — edge detection, safety net, notification on close)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     mode = "DRY-RUN" if DRY_RUN else "LIVE"
     log(f"Antigravity Quota Tracker v3.0  [{mode}]")
     log(f"CDP={CDP_PORT}  poll={POLL_INTERVAL}s  debounce={DEBOUNCE}s  dashboard={DASHBOARD_URL}")
-    log("Triggers: launch | profile_menu | sign_out_dialog | manual_refresh | post_close")
+    log(f"Triggers: launch | profile_menu | sign_out_dialog | manual_refresh | safety_net({SAFETY_NET_INTERVAL}s)")
     if not _HAS_PSUTIL:
         log(
-            "psutil not installed — launch and post_close triggers disabled. "
+            "psutil not installed — launch and close triggers disabled. "
             "Run: pip install psutil",
             level="WARN",
         )
     log("")
 
-    # Start heartbeat in background
+    # Start heartbeat thread
     threading.Thread(target=_heartbeat_loop, daemon=True, name="Heartbeat").start()
 
-    was_running:       bool  = False
-    ag_exe:            str   = ""
-    ag_args:           list  = []
-    no_cdp_warned_at:  float = 0.0
+    # ── State for edge detection ──────────────────────────────────────────────
+    ag_was_running    = False
+    ag_exe:    str    = ""
+    ag_args:   list   = []
+
+    # CDP-trigger edge state (all False = "was not visible")
+    last_state = {
+        "profile_menu_visible":    False,
+        "sign_out_dialog_visible": False,
+        "mutation_ts":             0,      # last seen __quotaUpdated timestamp
+    }
+
+    # Tracks the current settings CdpSession; None = need to (re)connect
+    sess: Optional[CdpSession] = None
+    sess_connected_for_pid: Optional[int] = None   # PID when sess was opened
+
+    # Bug A fix: initialize to now so first safety-net fires SAFETY_NET_INTERVAL
+    # seconds AFTER the watcher starts, not immediately.
+    last_safety_net  = time.time()
+    no_cdp_warned_at = 0.0
+
+    # Bug C fix: persistent CdpSession pool for main workbench windows.
+    # Keyed by CDP target id.  Cleaned up when targets disappear.
+    main_sessions: dict = {}
 
     while True:
         try:
-            if _capture_state["capturing"]:
+            # Skip polling while a capture lock is held (avoids concurrent DOM nav)
+            if _capture_lock.locked():
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # ── Process detection (launch + post-close triggers) ──────────────
+            # ── 1. Process detection ──────────────────────────────────────────
             ag_proc = find_antigravity_process()
+            ag_running = ag_proc is not None
+            ag_pid = ag_proc.pid if ag_proc else None
 
-            if not ag_proc:
-                if was_running:
-                    # Transition: running → stopped → post_close trigger
-                    log("Antigravity process exited — post_close trigger fired")
-                    invalidate_settings_session()
-                    if ag_exe:
-                        threading.Thread(
-                            target=relaunch_and_capture,
-                            args=(ag_exe, ag_args),
-                            daemon=True,
-                            name="PostClose",
-                        ).start()
-                    else:
-                        log("  Cannot relaunch: exe path unknown (psutil may be limited)", level="WARN")
-                    was_running = False
-                else:
-                    # Not running — log CDP warning periodically
-                    if time.time() - no_cdp_warned_at > 60:
-                        log(
-                            f"Antigravity not detected on CDP port {CDP_PORT}. "
-                            "Launch with --remote-debugging-port="
-                            f"{CDP_PORT} or run scripts/setup-windows.ps1.",
-                            level="WARN",
-                        )
-                        no_cdp_warned_at = time.time()
-                time.sleep(POLL_INTERVAL)
-                continue
-
-            # Antigravity IS running
-            if not was_running:
-                # Transition: stopped → running → launch trigger
+            # Launch edge: was not running → now running
+            if ag_running and not ag_was_running:
                 ag_exe, ag_args = _get_exe_and_args(ag_proc)
-                log(f"Antigravity detected: PID={ag_proc.pid}  exe={ag_exe[:60]!r}")
-                was_running      = True
+                log(f"Antigravity detected: PID={ag_pid}  exe={ag_exe[:60]!r}")
                 no_cdp_warned_at = 0.0
+
+                # Establish fresh CDP sessions for this new process
+                sess = None
+                sess_connected_for_pid = None
+                # Close all stale main-window sessions from the previous process
+                for _s in main_sessions.values():
+                    try:
+                        _s.close()
+                    except Exception:
+                        pass
+                main_sessions.clear()
+                # Bug A fix: reset safety-net so it doesn't immediately fire
+                # after launch (the launch trigger already captures fresh data).
+                last_safety_net = time.time()
 
                 def _do_launch():
                     time.sleep(RELAUNCH_SETTLE)   # let CDP stabilise
                     _fire_capture("launch", needs_refresh=True)
-
                 threading.Thread(target=_do_launch, daemon=True, name="Launch").start()
 
-            # ── Settings session + observer ────────────────────────────────────
-            sess = get_settings_session()
-            if sess:
-                ensure_observer(sess)
+            # Close edge: was running → now stopped
+            if not ag_running and ag_was_running:
+                elapsed_since_capture = time.time() - _capture_state["last_capture_ts"]
+                mins = int(elapsed_since_capture / 60)
+                log(
+                    f"Antigravity closed without sign-out trigger "
+                    f"— last capture was {mins} minute(s) ago"
+                )
+                # Invalidate session
+                invalidate_settings_session()
+                sess = None
+                sess_connected_for_pid = None
+                # Notify user (tray + toast) — do NOT relaunch
+                toast(
+                    "Antigravity closed — open it again to capture your final quota reading",
+                    title="Antigravity Quota Tracker",
+                )
+                if _HAS_APP_STATE and _app_state:
+                    _app_state.log(
+                        "Antigravity closed — reopen to capture final reading",
+                        _app_state.LEVEL_WARN,
+                    )
+                # Reset edge state and clear main-window sessions
+                last_state["profile_menu_visible"]    = False
+                last_state["sign_out_dialog_visible"] = False
+                last_state["mutation_ts"]             = 0
+                for _s in main_sessions.values():
+                    try:
+                        _s.close()
+                    except Exception:
+                        pass
+                main_sessions.clear()
 
-                # ── Manual refresh check (trigger 4 — no Refresh click needed) ─
-                flag = sess.evaluate(_MANUAL_CHECK_JS)
-                if flag == "manual_refresh":
+            ag_was_running = ag_running
+
+            # ── 2. CDP trigger checks (only when Antigravity is running) ──────
+            if not ag_running:
+                if time.time() - no_cdp_warned_at > 60:
+                    log(
+                        f"Antigravity not detected on CDP port {CDP_PORT}. "
+                        "Launch via patched shortcut or run scripts/setup-windows.ps1.",
+                        level="WARN",
+                    )
+                    no_cdp_warned_at = time.time()
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            # ── 2a. Maintain/refresh CdpSession for settingsScreen ─────────────
+            # Re-open if process changed or session dropped
+            if sess is None or sess_connected_for_pid != ag_pid:
+                sess = get_settings_session()
+                if sess:
+                    sess_connected_for_pid = ag_pid
+                    # Always re-inject observer on new connection
+                    ensure_observer(sess)
+                    log("CDP session (re)connected and observer injected", level="DEBUG")
+
+            # ── 2b. MutationObserver flag — manual_refresh trigger ─────────────
+            if sess:
+                mut_ts = sess.evaluate(_MUTATION_FLAG_JS)
+                if isinstance(mut_ts, (int, float)) and mut_ts and mut_ts != last_state["mutation_ts"]:
                     log("Trigger: manual_refresh (MutationObserver detected % change)")
+                    last_state["mutation_ts"] = mut_ts
                     _fire_capture("manual_refresh", needs_refresh=False)
                     time.sleep(POLL_INTERVAL)
                     continue
 
-            # ── Cheap trigger poll on editor page targets ──────────────────────
-            pages        = _get_all_page_targets(CDP_PORT)
-            editor_pages = [t for t in pages if "settingsScreen" not in t.get("url", "")]
+            # ── 2c. Main-window trigger poll (profile_menu / sign_out) ─────────────
+            #
+            # Root-cause fix: Antigravity sets ALL CDP page target URLs to
+            # '?settingsScreen=...' (even the main editor).  We now use
+            # _is_settings_panel() (title-based) to separate the floating Settings
+            # panel from the main editor window(s).
+            #
+            # We run _TRIGGER_DETECT_JS on each main-editor target via persistent
+            # CdpSession.  If the persistent session fails (returns None), we fall
+            # back to one-shot cdp_evaluate so triggers still fire.
 
-            for target in editor_pages:
-                result = cdp_evaluate(target, _CHEAP_TRIGGER_JS, timeout=3.0)
-                if result == "profile_menu":
-                    log("Trigger: profile_menu (Sign Out button element visible)")
-                    _fire_capture("profile_menu", needs_refresh=True)
+            pages = _get_all_page_targets(CDP_PORT)
+            main_pages = [t for t in pages if not _is_settings_panel(t)]
+            current_ids = {t.get("id") for t in main_pages}
+
+            # Clean up sessions for targets that have disappeared
+            for gone_id in [k for k in main_sessions if k not in current_ids]:
+                try:
+                    main_sessions[gone_id].close()
+                except Exception:
+                    pass
+                del main_sessions[gone_id]
+
+            profile_menu_now    = False
+            sign_out_dialog_now = False
+
+            if not main_pages:
+                log("No main-editor CDP targets found (only Settings panel visible)",
+                    level="DEBUG")
+
+            for target in main_pages:
+                target_id = target.get("id", "")
+                ws_url    = target.get("webSocketDebuggerUrl", "")
+                if not ws_url:
+                    continue
+
+                # Get or (re)create persistent session
+                existing = main_sessions.get(target_id)
+                if existing is None or existing._closed:
+                    try:
+                        main_sessions[target_id] = CdpSession(ws_url)
+                        log(f"Main-window session connected id={target_id[:8]}",
+                            level="DEBUG")
+                    except Exception as exc:
+                        log(f"Main-window connect failed: {exc}", level="DEBUG")
+
+                trigger_result = None
+
+                # Try persistent session first
+                if target_id in main_sessions and not main_sessions[target_id]._closed:
+                    try:
+                        trigger_result = main_sessions[target_id].evaluate(_TRIGGER_DETECT_JS)
+                    except Exception as exc:
+                        log(f"Persistent session eval failed: {exc}", level="DEBUG")
+                        main_sessions[target_id]._closed = True
+
+                # Fallback: one-shot cdp_evaluate if persistent session failed
+                if trigger_result is None:
+                    trigger_result = cdp_evaluate(target, _TRIGGER_DETECT_JS, timeout=4.0)
+                    if trigger_result:
+                        log(f"  (used one-shot fallback — persistent session down)",
+                            level="DEBUG")
+
+                if trigger_result == "profile_menu":
+                    profile_menu_now = True
+                elif trigger_result == "sign_out_dialog":
+                    sign_out_dialog_now = True
+
+                if profile_menu_now or sign_out_dialog_now:
                     break
-                elif result == "sign_out_dialog":
-                    log("Trigger: sign_out_dialog")
-                    _fire_capture("sign_out_dialog", needs_refresh=True)
-                    break
+
+            # Edge: profile menu opened (fires ONCE per opening)
+            if profile_menu_now and not last_state["profile_menu_visible"]:
+                log("Trigger: profile_menu (dropdown opened in main window)")
+                _fire_capture("profile_menu", needs_refresh=True)
+
+            # Edge: sign-out dialog appeared
+            if sign_out_dialog_now and not last_state["sign_out_dialog_visible"]:
+                log("Trigger: sign_out_dialog")
+                _fire_capture("sign_out_dialog", needs_refresh=True)
+
+            last_state["profile_menu_visible"]    = profile_menu_now
+            last_state["sign_out_dialog_visible"] = sign_out_dialog_now
+
+            # ── 3. Safety-net timer ───────────────────────────────────────────
+            if time.time() - last_safety_net > SAFETY_NET_INTERVAL:
+                log("Trigger: safety_net (periodic capture)")
+                _fire_capture("safety_net", needs_refresh=True)
+                last_safety_net = time.time()
 
         except KeyboardInterrupt:
             raise
@@ -1437,12 +1639,7 @@ def main() -> None:
 def run_watcher() -> None:
     """
     Public entry point for the CDP watcher loop.
-    Call in a daemon thread from main.py:
-
-        threading.Thread(target=run_watcher, daemon=True).start()
-
-    Identical to calling main() — extracted so main.py can import and
-    use it without spawning a subprocess.
+    Called in a daemon thread from main.py.
     """
     main()
 
