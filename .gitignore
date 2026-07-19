@@ -1,3 +1,32 @@
+# ── Python / project-specific ─────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+
+# SQLite database files and data directory
+*.db
+*.db-shm
+*.db-wal
+dashboard/data/
+
+# PyInstaller build artefacts
+dist/
+build/
+*.spec
+
+# Mac OS
+.DS_Store
+.DS_Store?
+._*
+
+# dotenv / secrets
+.env
+.env.*
+!.env.example
+!config.example.env
+
+# ── Node.js (legacy artefacts from earlier versions) ──────────────────────────
 # Logs
 logs
 *.log
