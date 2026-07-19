@@ -24,7 +24,16 @@ if "--webview-launcher" in sys.argv:
     _idx = sys.argv.index("--webview-launcher")
     _url = sys.argv[_idx + 1] if _idx + 1 < len(sys.argv) else "http://localhost:4300"
     import webview as _wv
-    _wv.create_window(
+
+    # Parse optional --x / --y position args forwarded from tray_icon.py
+    def _get_arg(name):
+        try:
+            i = sys.argv.index(name)
+            return int(sys.argv[i + 1])
+        except (ValueError, IndexError):
+            return None
+
+    _wv_kwargs = dict(
         title="Quota Tracker",
         url=_url,
         width=420,
@@ -33,6 +42,14 @@ if "--webview-launcher" in sys.argv:
         min_size=(360, 480),
         background_color="#0b0f1a",
     )
+    _wx = _get_arg("--x")
+    _wy = _get_arg("--y")
+    if _wx is not None:
+        _wv_kwargs["x"] = _wx
+    if _wy is not None:
+        _wv_kwargs["y"] = _wy
+
+    _wv.create_window(**_wv_kwargs)
     _wv.start()
     sys.exit(0)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -117,6 +134,59 @@ def _register_windows_startup() -> None:
         log.debug(f"Could not register startup: {exc}")
 
 
+# ── First-run Antigravity detection ──────────────────────────────────────────
+
+def _check_antigravity_installed() -> None:
+    """
+    Check whether Antigravity IDE is installed in any standard location.
+    Runs once at startup (in a daemon thread, after a short delay).
+
+    If Antigravity is not found, logs a clear warning with actionable steps
+    so users on a fresh machine get guidance rather than a confusing blank state.
+    Does NOT crash or block startup.
+    """
+    import time as _time
+    _time.sleep(2.0)   # let Flask + tray initialise first
+
+    candidates = []
+    if sys.platform == "win32":
+        localappdata = os.environ.get("LOCALAPPDATA", "")
+        programfiles = os.environ.get("PROGRAMFILES", "")
+        pfiles_x86   = os.environ.get("PROGRAMFILES(X86)", "")
+        candidates = [
+            Path(localappdata) / "Programs" / "Antigravity IDE" / "Antigravity IDE.exe",
+            Path(localappdata) / "Programs" / "Antigravity"     / "Antigravity.exe",
+            Path(programfiles) / "Antigravity IDE" / "Antigravity IDE.exe",
+            Path(pfiles_x86)   / "Antigravity IDE" / "Antigravity IDE.exe",
+        ]
+    elif sys.platform == "darwin":
+        home = Path.home()
+        candidates = [
+            Path("/Applications/Antigravity IDE.app"),
+            Path("/Applications/Antigravity.app"),
+            home / "Applications" / "Antigravity IDE.app",
+            home / "Applications" / "Antigravity.app",
+        ]
+
+    found = any(p.exists() for p in candidates if p != Path(""))
+    if not found:
+        log.warning(
+            "Antigravity IDE not found in standard install locations. "
+            "If it is installed elsewhere, the tracker will still work — "
+            "but if this is a first install, download Antigravity IDE and "
+            "then run the setup script: "
+            "  Windows: powershell -ExecutionPolicy Bypass -File scripts\\setup-windows.ps1 "
+            "  Mac:     bash scripts/setup-mac.sh"
+        )
+        app_state.log(
+            "Antigravity IDE not found in standard locations — "
+            "run setup script after installing it.",
+            app_state.LEVEL_WARN,
+        )
+    else:
+        log.debug("Antigravity IDE found in standard install location.")
+
+
 # ── Flask server thread ───────────────────────────────────────────────────────
 
 def _start_flask() -> None:
@@ -163,6 +233,9 @@ def main() -> None:
 
     # Auto-register in Windows startup
     threading.Thread(target=_register_windows_startup, daemon=True, name="StartupReg").start()
+
+    # First-run Antigravity install check
+    threading.Thread(target=_check_antigravity_installed, daemon=True, name="InstallCheck").start()
 
     # Thread 1: Flask
     threading.Thread(target=_start_flask, daemon=True, name="Flask").start()

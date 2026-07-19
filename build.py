@@ -23,6 +23,7 @@ import os
 import sys
 import subprocess
 import shutil
+import plistlib
 from pathlib import Path
 
 ROOT      = Path(__file__).parent
@@ -152,13 +153,56 @@ def run_build(onefile: bool = IS_WINDOWS, debug: bool = False) -> None:
         print("  The tray icon will appear in the system tray.")
         print("  Open http://localhost:4300 in your browser for the dashboard.")
         print("━" * 50)
+
+        # Post-process Mac .app to set LSUIElement (hide from Dock + Cmd+Tab)
+        if IS_MAC:
+            _patch_mac_plist()
     else:
         print()
         print("✗ Build failed (see errors above)")
         sys.exit(result.returncode)
 
+def _patch_mac_plist() -> None:
+    """
+    Post-process the macOS .app bundle's Info.plist to set LSUIElement = True.
 
-def _first_run_setup() -> None:
+    LSUIElement = True is required for a menu-bar-only app:
+      - Hides the app from the Dock
+      - Hides the app from the Cmd+Tab application switcher
+      - App still appears in the Mac menu bar (NSStatusBar) via pystray
+
+    Must be called AFTER a successful `python build.py` on macOS.
+    Uses stdlib plistlib — no external dependencies.
+    """
+    app_bundle = DIST_DIR / "AntigravityQuotaTracker.app"
+    plist_path = app_bundle / "Contents" / "Info.plist"
+
+    if not plist_path.exists():
+        print(f"  [WARN] Info.plist not found at {plist_path} — LSUIElement not set")
+        print("         (Expected for --onedir Mac build; check DIST_DIR)")
+        return
+
+    try:
+        with open(plist_path, "rb") as f:
+            plist = plistlib.load(f)
+
+        if plist.get("LSUIElement") is True:
+            print("  [INFO] LSUIElement already set to True in Info.plist")
+            return
+
+        plist["LSUIElement"] = True
+
+        with open(plist_path, "wb") as f:
+            plistlib.dump(plist, f)
+
+        print("✓ Patched Info.plist: LSUIElement = True (app will not appear in Dock)")
+    except Exception as exc:
+        print(f"  [ERROR] Could not patch Info.plist: {exc}")
+        print("  The app will still work, but will appear in the Dock.")
+        print("  To fix manually: add <key>LSUIElement</key><true/> to:")
+        print(f"  {plist_path}")
+
+
     """
     Called automatically when the packaged .exe runs for the first time.
     Detects Antigravity and patches its shortcut.

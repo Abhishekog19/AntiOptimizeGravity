@@ -250,6 +250,38 @@ def _get_all_page_targets(port: int = CDP_PORT) -> list:
         return []
 
 
+def check_cdp_port(port: int = CDP_PORT) -> str:
+    """
+    Probe port and return a status string:
+      'ok'            — port is open AND returning valid CDP JSON
+      'conflict'      — port is open but NOT returning valid CDP JSON
+                        (some other HTTP server is occupying the port)
+      'not_open'      — connection refused (Antigravity not running with the flag)
+
+    'Conflict' detection logic: a valid CDP /json response is a JSON *list* whose
+    items are dicts that each have a 'webSocketDebuggerUrl' key.  If the response
+    is not a list, or the list is empty, or items lack that key, we classify it as
+    a conflict rather than valid CDP.  This prevents mis-classifying a successful
+    response from an unrelated HTTP service as "CDP is working".
+    """
+    try:
+        data = _http_get_json(f"http://localhost:{port}/json", timeout=3.0)
+        # Valid CDP: must be a list of target dicts with webSocketDebuggerUrl
+        if not isinstance(data, list):
+            return "conflict"
+        # An empty list is fine — Antigravity may be loading (no pages yet).
+        # But if items exist and none have webSocketDebuggerUrl, it's not CDP.
+        if data and not any("webSocketDebuggerUrl" in t for t in data if isinstance(t, dict)):
+            return "conflict"
+        return "ok"
+    except (OSError, ConnectionRefusedError):
+        return "not_open"
+    except Exception:
+        # Timeout, non-JSON response, etc. — treat as conflict (something responded
+        # but it wasn't CDP-shaped).
+        return "conflict"
+
+
 def _is_settings_panel(t: dict) -> bool:
     """
     Return True if a CDP target IS the floating Settings panel (not the main editor).
@@ -932,18 +964,62 @@ def parse_reset_to_timestamp(raw: Optional[str],
     return (captured_at + delta).isoformat() if delta.total_seconds() > 0 else None
 
 
-def _parse_section(lines: list, start: int, end: int) -> Optional[dict]:
+def _parse_section(lines: list, start: int, end: int,
+                   section_name: str = "unknown") -> Optional[dict]:
+    """
+    Parse a quota section (e.g. 'claudeGpt' or 'gemini') from a slice of
+    Settings > Models innerText lines.
+
+    On parse failure, logs which specific label search failed so UI drift
+    produces an actionable bug report rather than a silent None return.
+    """
     section = lines[start:end]
     wi = _find_line(section, "Weekly Limit")
     fi = _find_line(section, "Five Hour Limit")
-    if wi is None or fi is None:
+
+    # ── Specific label failure logging ──────────────────────────────────────
+    if wi is None:
+        log(
+            f"  Parse [{section_name}]: 'Weekly Limit' label NOT FOUND in "
+            f"section lines [{start}:{end}] ({len(section)} lines). "
+            "This string may have changed in a recent Antigravity update — "
+            "use 'Run Diagnostics' from the tray menu and paste the output into a GitHub issue.",
+            level="WARN",
+        )
         return None
+    if fi is None:
+        log(
+            f"  Parse [{section_name}]: 'Five Hour Limit' label NOT FOUND in "
+            f"section lines [{start}:{end}] ({len(section)} lines). "
+            "This string may have changed in a recent Antigravity update — "
+            "use 'Run Diagnostics' from the tray menu and paste the output into a GitHub issue.",
+            level="WARN",
+        )
+        return None
+
     wp = _find_pct(section, wi, fi)
     wr = _find_reset(section, wi, fi)
     fp = _find_pct(section, fi, len(section))
     fr = _find_reset(section, fi, len(section))
+
+    # ── Percentage extraction failure logging ────────────────────────────────
+    if wp is None:
+        log(
+            f"  Parse [{section_name}]: weeklyPct NOT FOUND between "
+            f"'Weekly Limit' (line {wi}) and 'Five Hour Limit' (line {fi}). "
+            f"Lines searched: {section[wi:fi]!r}",
+            level="WARN",
+        )
+    if fp is None:
+        log(
+            f"  Parse [{section_name}]: fiveHourPct NOT FOUND after "
+            f"'Five Hour Limit' (line {fi}) to end of section (line {len(section)}). "
+            f"Lines searched: {section[fi:]!r}",
+            level="WARN",
+        )
     if wp is None or fp is None:
         return None
+
     if wr and _extract_number(wr, "day")  > 7: return None
     if fr and _extract_number(fr, "hour") > 5: return None
     return {"weeklyPct": wp, "weeklyReset": wr, "fiveHourPct": fp, "fiveHourReset": fr}
@@ -954,11 +1030,26 @@ def parse_quota(text: str) -> Optional[dict]:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     gi    = _find_line(lines, "Gemini Models")
     ci    = _find_line(lines, "Claude and GPT models")
+
     if ci is None:
+        log(
+            "  Parse: 'Claude and GPT models' section header NOT FOUND in Settings > Models text. "
+            f"Total lines in text: {len(lines)}. "
+            "This is likely a UI change in Antigravity — "
+            "use 'Run Diagnostics' from the tray menu and paste the output into a GitHub issue.",
+            level="WARN",
+        )
         return None
+
+    if gi is None:
+        log(
+            "  Parse: 'Gemini Models' section header not found — skipping Gemini section.",
+            level="DEBUG",
+        )
+
     return {
-        "gemini":    _parse_section(lines, gi, ci) if gi is not None else None,
-        "claudeGpt": _parse_section(lines, ci, len(lines)),
+        "gemini":    _parse_section(lines, gi, ci, "gemini") if gi is not None else None,
+        "claudeGpt": _parse_section(lines, ci, len(lines), "claudeGpt"),
     }
 
 
@@ -1507,11 +1598,33 @@ def main() -> None:
             # ── 2. CDP trigger checks (only when Antigravity is running) ──────
             if not ag_running:
                 if time.time() - no_cdp_warned_at > 60:
-                    log(
-                        f"Antigravity not detected on CDP port {CDP_PORT}. "
-                        "Launch via patched shortcut or run scripts/setup-windows.ps1.",
-                        level="WARN",
-                    )
+                    # Use check_cdp_port() to emit a specific, actionable message
+                    # rather than a generic "not detected" warning.
+                    port_status = check_cdp_port(CDP_PORT)
+                    if port_status == "not_open":
+                        log(
+                            f"Antigravity process not found and port {CDP_PORT} is closed. "
+                            "Launch Antigravity via the debug shortcut "
+                            "(run scripts/setup-windows.ps1 once if you haven't already).",
+                            level="WARN",
+                        )
+                    elif port_status == "conflict":
+                        log(
+                            f"Port {CDP_PORT} is open but is NOT responding with valid CDP JSON. "
+                            "Something else is using this port. "
+                            "Either stop the conflicting service, or change CDP_PORT in notifier/.env "
+                            "and re-run the setup script with the matching --Port value.",
+                            level="WARN",
+                        )
+                    else:
+                        # Port is open and returning CDP data, but psutil can't see the process
+                        # (rare: process may be running under a different name on this platform)
+                        log(
+                            f"CDP port {CDP_PORT} is responding but Antigravity process not detected by psutil. "
+                            "Triggers will not fire until the process is found. "
+                            "Verify the process name via Task Manager.",
+                            level="WARN",
+                        )
                     no_cdp_warned_at = time.time()
                 time.sleep(POLL_INTERVAL)
                 continue
