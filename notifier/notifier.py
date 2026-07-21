@@ -696,7 +696,7 @@ def ensure_settings_open(port: int = CDP_PORT) -> Optional[CdpSession]:
                 log("  Settings target opened successfully", level="DEBUG")
                 return _settings_session
 
-    log("  Could not open Settings > Models within timeout", level="WARN")
+    log("  Could not open Settings > Models within timeout", level="DEBUG")
     return None
 
 
@@ -1180,8 +1180,18 @@ def run_capture_sequence(trigger: str, needs_refresh: bool = True,
         #    yet, so ensure_settings_open() tries to open it via CDP.
         sess = session or ensure_settings_open()
         if sess is None:
-            log("  Settings > Models could not be opened", level="ERROR")
-            toast("Capture failed: could not open Settings > Models")
+            if trigger in ("launch", "ghost_settings"):
+                # At launch time the Settings panel is not yet open — this is
+                # normal behaviour, not an error.  The safety-net / profile-menu
+                # / sign-out triggers will capture once the user opens Settings.
+                log(
+                    f"  [{trigger}] Settings panel not open yet — skipping. "
+                    "Will capture automatically when Settings is opened.",
+                    level="INFO",
+                )
+            else:
+                log("  Settings > Models could not be opened", level="ERROR")
+                toast("Capture failed: could not open Settings > Models")
             return
 
         # 2. Read email from Account page
@@ -1523,6 +1533,10 @@ def main() -> None:
     # Keyed by CDP target id.  Cleaned up when targets disappear.
     main_sessions: dict = {}
 
+    # Tracks whether there were main-editor CDP targets on the previous poll.
+    # Used to detect "user closed main editor while Settings is still open".
+    main_pages_had_targets: bool = False
+
     while True:
         try:
             # Skip polling while a capture lock is held (avoids concurrent DOM nav)
@@ -1568,20 +1582,82 @@ def main() -> None:
                     f"Antigravity closed without sign-out trigger "
                     f"— last capture was {mins} minute(s) ago"
                 )
-                # Invalidate session
+
+                # ── Ghost-Settings capture ────────────────────────────────────
+                # When the user closes Antigravity via X, the main editor window
+                # closes but the Settings panel (a separate Electron renderer)
+                # often survives — the user must close it manually.  Its CDP
+                # target is still alive and reachable.
+                #
+                # Before giving up and asking the user to reopen, we check for
+                # up to 5 s whether the Settings target is still alive.  If it
+                # is, we run a full capture from it (Refresh → read → POST) with
+                # no relaunch, no window flash, no user action needed.
+                def _try_ghost_capture():
+                    log("Checking for surviving Settings panel after editor close...")
+                    surviving_sess = None
+                    for attempt in range(5):
+                        time.sleep(1.0)
+                        target = find_settings_target(CDP_PORT)
+                        if target:
+                            ws_url = target.get("webSocketDebuggerUrl")
+                            if ws_url:
+                                try:
+                                    surviving_sess = CdpSession(ws_url)
+                                    log(
+                                        f"Settings panel still alive after editor close "
+                                        f"(found on attempt {attempt + 1}) — capturing final quota.",
+                                    )
+                                except Exception as e:
+                                    log(f"  Ghost: could not connect to Settings panel: {e}", level="DEBUG")
+                            break
+                        log(f"  Ghost attempt {attempt + 1}/5: Settings target not found yet", level="DEBUG")
+
+                    if surviving_sess:
+                        if _capture_lock.acquire(blocking=False):
+                            try:
+                                run_capture_sequence(
+                                    "ghost_settings",
+                                    needs_refresh=True,
+                                    session=surviving_sess,
+                                )
+                            finally:
+                                _capture_lock.release()
+                                try:
+                                    surviving_sess.close()
+                                except Exception:
+                                    pass
+                        else:
+                            log("Ghost-settings: capture already in progress — skipping", level="DEBUG")
+                            try:
+                                surviving_sess.close()
+                            except Exception:
+                                pass
+                        if _HAS_APP_STATE and _app_state:
+                            _app_state.log(
+                                "Antigravity closed — final quota captured from surviving Settings panel.",
+                                _app_state.LEVEL_OK,
+                            )
+                    else:
+                        # Settings panel is gone — fall back to old "please reopen" behaviour
+                        log("Settings panel gone after editor close — final capture not possible", level="WARN")
+                        toast(
+                            "Antigravity closed — open it again to capture your final quota reading",
+                            title="Antigravity Quota Tracker",
+                        )
+                        if _HAS_APP_STATE and _app_state:
+                            _app_state.log(
+                                "Antigravity closed — reopen to capture final reading",
+                                _app_state.LEVEL_WARN,
+                            )
+
+                threading.Thread(target=_try_ghost_capture, daemon=True, name="GhostCapture").start()
+
+                # Invalidate session immediately so the poll loop doesn't try
+                # to use the dead CDP connection while GhostCapture is running.
                 invalidate_settings_session()
                 sess = None
                 sess_connected_for_pid = None
-                # Notify user (tray + toast) — do NOT relaunch
-                toast(
-                    "Antigravity closed — open it again to capture your final quota reading",
-                    title="Antigravity Quota Tracker",
-                )
-                if _HAS_APP_STATE and _app_state:
-                    _app_state.log(
-                        "Antigravity closed — reopen to capture final reading",
-                        _app_state.LEVEL_WARN,
-                    )
                 # Reset edge state and clear main-window sessions
                 last_state["profile_menu_visible"]    = False
                 last_state["sign_out_dialog_visible"] = False
@@ -1592,6 +1668,7 @@ def main() -> None:
                     except Exception:
                         pass
                 main_sessions.clear()
+
 
             ag_was_running = ag_running
 
@@ -1663,6 +1740,28 @@ def main() -> None:
             pages = _get_all_page_targets(CDP_PORT)
             main_pages = [t for t in pages if not _is_settings_panel(t)]
             current_ids = {t.get("id") for t in main_pages}
+
+            # ── Editor-closed CDP trigger ─────────────────────────────────────
+            # Detect: main editor windows just disappeared while Settings panel
+            # (and its CDP session) is still alive.
+            #
+            # This is the exact moment the user closed the editor via X — the
+            # main renderer windows drop off the CDP /json list, but the Settings
+            # panel renderer is still serving its CDP target.
+            #
+            # Fire a capture NOW (before the user closes Settings too).
+            # This is fundamentally different from ghost capture:
+            #   ghost_settings = fires AFTER psutil says process is dead (too late)
+            #   editor_closed  = fires WHILE the process is still alive, at the
+            #                    CDP level, using the still-open Settings panel.
+            if main_pages_had_targets and not main_pages and sess is not None:
+                if sess.is_alive():
+                    log(
+                        "Editor windows closed while Settings panel still alive "
+                        "— capturing final quota now."
+                    )
+                    _fire_capture("editor_closed", needs_refresh=True)
+            main_pages_had_targets = bool(main_pages)
 
             # Clean up sessions for targets that have disappeared
             for gone_id in [k for k in main_sessions if k not in current_ids]:

@@ -100,6 +100,87 @@ VERBOSE  = "--verbose" in sys.argv or _LOG_LEVEL == "DEBUG"
 if VERBOSE:
     logging.getLogger().setLevel(logging.DEBUG)
 
+# ── Crash log (written before any thread or logger has a chance to die) ───────
+import traceback as _traceback_mod
+import datetime as _dt
+
+_CRASH_LOG = _ROOT / "crash_log.txt"
+
+
+def _crash_guard(thread_name: str, fn, *args, **kwargs):
+    """
+    Call fn(*args, **kwargs) inside an outermost exception barrier.
+
+    On any uncaught exception (including BaseException subclasses that escape
+    inner try/except blocks like SystemExit, KeyboardInterrupt, etc.):
+      1. Formats the full traceback via traceback.format_exc()
+      2. Appends it to crash_log.txt in the project root (synchronous write,
+         no reliance on the logging subsystem)
+      3. Prints it to stderr so it appears in the console
+      4. Re-raises the original exception so the thread dies normally
+
+    This is applied at the outermost level of every long-lived thread so that
+    crashes which escape all inner try/except blocks leave evidence behind.
+    """
+    try:
+        fn(*args, **kwargs)
+    except KeyboardInterrupt:
+        raise   # let Ctrl-C propagate normally
+    except Exception:
+        _write_crash(thread_name)
+        raise
+    except BaseException:
+        # Catches SystemExit, GeneratorExit, etc. — write log then re-raise
+        _write_crash(thread_name)
+        raise
+
+
+def _write_crash(thread_name: str) -> None:
+    """Write a timestamped crash entry to crash_log.txt and stderr."""
+    tb  = _traceback_mod.format_exc()
+    ts  = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sep = "=" * 70
+    entry = (
+        f"\n{sep}\n"
+        f"CRASH  {ts}  thread={thread_name}\n"
+        f"{sep}\n"
+        f"{tb}"
+        f"{sep}\n"
+    )
+    # Write to file — open in append mode so multiple crashes accumulate
+    try:
+        with open(_CRASH_LOG, "a", encoding="utf-8") as fh:
+            fh.write(entry)
+    except OSError:
+        pass   # can't write the log — at least print it
+    # Always print to stderr (visible in terminal even if logger is broken)
+    print(entry, file=sys.stderr, flush=True)
+
+
+def _write_event(label: str, detail: str = "") -> None:
+    """
+    Append a timestamped non-crash event marker to crash_log.txt.
+    Used for startup and clean-exit markers so the file always exists
+    and we can distinguish 'started but killed externally' from 'crashed'
+    from 'exited cleanly'.
+    """
+    ts  = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sep = "-" * 70
+    entry = f"{sep}\n{label}  {ts}  pid={os.getpid()}  {detail}\n"
+    try:
+        with open(_CRASH_LOG, "a", encoding="utf-8") as fh:
+            fh.write(entry)
+    except OSError:
+        pass
+
+
+# Write startup marker immediately — this guarantees crash_log.txt exists
+# so we can tell 'file never written' from 'program killed externally'.
+_write_event("STARTED", f"argv={sys.argv!r}")
+
+import atexit as _atexit
+_atexit.register(lambda: _write_event("CLEAN EXIT"))
+
 # ── Shared state ──────────────────────────────────────────────────────────────
 from state import app_state
 
@@ -190,10 +271,18 @@ def _check_antigravity_installed() -> None:
 # ── Flask server thread ───────────────────────────────────────────────────────
 
 def _start_flask() -> None:
-    from server.flask_app import run_flask
-    port = int(os.environ.get("PORT", "4300"))
-    log.info(f"Starting Flask dashboard on http://localhost:{port}")
-    run_flask(host="0.0.0.0", port=port, debug=False)
+    try:
+        from server.flask_app import run_flask
+        port = int(os.environ.get("PORT", "4300"))
+        log.info(f"Starting Flask dashboard on http://localhost:{port}")
+        run_flask(host="0.0.0.0", port=port, debug=False)
+    except Exception as exc:
+        log.error(f"Flask server crashed: {exc}", exc_info=True)
+        raise   # let crash_guard catch it at the outer level
+
+
+def _start_flask_guarded() -> None:
+    _crash_guard("Flask", _start_flask)
 
 
 # ── CDP watcher thread ────────────────────────────────────────────────────────
@@ -207,6 +296,11 @@ def _start_watcher() -> None:
     except Exception as exc:
         log.error(f"CDP watcher crashed: {exc}", exc_info=True)
         app_state.log(f"Watcher crashed: {exc}", app_state.LEVEL_ERROR)
+        raise   # let crash_guard catch it at the outer level
+
+
+def _start_watcher_guarded() -> None:
+    _crash_guard("Watcher", _start_watcher)
 
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────────
@@ -238,10 +332,10 @@ def main() -> None:
     threading.Thread(target=_check_antigravity_installed, daemon=True, name="InstallCheck").start()
 
     # Thread 1: Flask
-    threading.Thread(target=_start_flask, daemon=True, name="Flask").start()
+    threading.Thread(target=_start_flask_guarded, daemon=True, name="Flask").start()
 
     # Thread 2: CDP watcher
-    threading.Thread(target=_start_watcher, daemon=True, name="Watcher").start()
+    threading.Thread(target=_start_watcher_guarded, daemon=True, name="Watcher").start()
 
     # Seed account cache
     def _seed_accounts():
@@ -275,7 +369,8 @@ def main() -> None:
     log.info(">>> Click '^' near the clock if the icon is hidden")
     app_state.log("Ready - tray active", app_state.LEVEL_OK)
 
-    tray.run()   # blocks main thread (required by pystray on Windows/macOS)
+    log.info(f"Crash log will be written to: {_CRASH_LOG}")
+    _crash_guard("TrayMain", tray.run)   # blocks main thread
 
 
 if __name__ == "__main__":
