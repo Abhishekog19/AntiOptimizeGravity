@@ -82,11 +82,12 @@ Chrome DevTools Protocol (CDP). This tracker:
 
 1. **Starts Antigravity with** `--remote-debugging-port=9222` (via the patched
    shortcut) — this exposes a local HTTP endpoint for CDP.
-2. **Polls** that endpoint every 2 seconds for trigger conditions (no network
-   traffic, all local).
-3. **On a trigger**, navigates the Settings panel to the Models page via CDP,
-   clicks Refresh, waits 3 seconds for the server response, then reads the
-   quota numbers from the DOM text.
+2. **Maintains a persistent CDP connection** to the main workbench window with
+   the Network domain enabled. No DOM polling — the tracker listens passively
+   for `Network.requestWillBeSent` events.
+3. **On a `GetTurnDiff` network request**, fires a capture: navigates the
+   Settings panel to the Models page via CDP, clicks Refresh, waits 3 seconds
+   for the server response, then reads the quota numbers from the DOM text.
 4. **Stores** the reading in a local SQLite database (`dashboard/data/quota.db`).
 5. **Updates** the tray icon colour and the web dashboard.
 
@@ -95,14 +96,27 @@ CDP gives us direct access to the actual DOM text — deterministic, fast, and
 doesn't break when the UI is offscreen or minimized. OCR requires Tesseract
 and fails on high-DPI screens. Screenshot scraping breaks on theme changes.
 
+**Why GetTurnDiff?**
+Every completed agent response in Antigravity IDE triggers exactly two rapid
+`GetTurnDiff` network requests to the backend. Listening for this event is more
+accurate than UI-event approximations (profile menu, sign-out dialog) because
+it fires at the exact moment quota is consumed — no polling, no DOM text scans.
+
 ---
 
 ## Two capture triggers
 
-| Trigger | When | Action |
-|---------|------|--------|
-| **launch** | Antigravity opens | Baseline reading |
-| **GetTurnDiff** | Agent response completes | Capture with refresh |
+| # | Trigger | When | Action |
+|---|---------|------|---------|
+| 1 | **launch** | Antigravity process appears | Navigate to Settings › Models, Refresh, read |
+| 2 | **GetTurnDiff** | Agent response completes | Navigate to Settings › Models, Refresh, read |
+
+The GetTurnDiff trigger fires via a persistent CDP Network domain listener on the
+main workbench window. Antigravity emits exactly two rapid GetTurnDiff network
+requests per completed agent response; a 500 ms debounce collapses them into one
+capture event — so the dashboard receives exactly one reading per response.
+
+A **manual capture** is always available via right-click → Capture Now in the tray menu.
 
 ---
 
@@ -145,7 +159,7 @@ Copy `notifier/config.example.env` to `notifier/.env` and edit values:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `CDP_PORT` | `9222` | Chrome DevTools Protocol port |
-| `POLL_INTERVAL_SECONDS` | `2` | How often to check for triggers |
+| `POLL_INTERVAL_SECONDS` | `2` | How often to check Antigravity process state |
 | `DEBOUNCE_SECONDS` | `2` | Min seconds between captures |
 | `DASHBOARD_URL` | `http://localhost:4300` | Dashboard URL |
 | `DASHBOARD_API_KEY` | *(empty)* | Optional API key for remote access |
@@ -160,6 +174,9 @@ Copy `notifier/config.example.env` to `notifier/.env` and edit values:
 Antigravity only fetches quota from its servers when the Settings › Models
 panel is rendered. This tracker reads that data — it cannot retroactively
 recover quota data for time periods when Settings › Models was never displayed.
+
+For the GetTurnDiff trigger to produce accurate data, open Settings › Models
+at least once per session before sending messages to the agent.
 
 ### Mac support is experimental
 
@@ -188,9 +205,12 @@ The report shows exactly which strings are `FOUND` vs `MISSING` in the current
 Antigravity UI. Paste the report into a GitHub issue — that's everything needed
 to update the parser.
 
-### psutil required for launch and close triggers
+### psutil required for launch and close detection
 
-Without `psutil`, the process-detection triggers (`launch` and `close` detection) are silently disabled. The `GetTurnDiff` network trigger still works as long as the CDP connection is established.
+Without `psutil`, the process-detection triggers (launch and close notification)
+are silently disabled. The GetTurnDiff network listener still sets up correctly
+if Antigravity is already running, but there will be no automatic capture on
+launch and no "closed" toast.
 
 ```bash
 pip install psutil
@@ -280,7 +300,7 @@ antigravity-quota-tracker/
 ├── tray/
 │   └── tray_icon.py           # pystray tray icon + diagnostic mode
 ├── notifier/
-│   ├── notifier.py            # CDP watcher (5 triggers + safety net)
+│   ├── notifier.py            # CDP watcher (2 triggers: launch + GetTurnDiff)
 │   ├── config.example.env     # Configuration template
 │   └── requirements.txt       # Python dependencies
 ├── dashboard/

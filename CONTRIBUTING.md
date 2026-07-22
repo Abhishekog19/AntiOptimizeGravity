@@ -97,8 +97,9 @@ If any of these have changed, the diagnostic report will show them as
 3. Test manually:
    - `python main.py` starts cleanly
    - Right-click tray → Run Diagnostics → report opens without error
-   - If changing the parser, run `python notifier/notifier.py --dry-run`
-     with Antigravity open at Settings › Models and confirm quota is parsed.
+   - Open Antigravity → `launch` trigger fires and a capture appears in the log
+   - Send a message to the agent → `GetTurnDiff` fires once per response
+   - If changing the parser, confirm quota is parsed from Settings › Models
 4. Open a pull request with a description of what you changed and why.
 
 For large changes, open an issue first to discuss the approach.

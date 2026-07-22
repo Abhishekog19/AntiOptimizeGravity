@@ -84,7 +84,7 @@ You should see:
 ```
 [HH:MM:SS INFO ] Antigravity Quota Tracker v3.0  [LIVE]
 [HH:MM:SS INFO ] CDP=9222  poll=2s  debounce=30s  dashboard=http://localhost:4300
-[HH:MM:SS INFO ] Triggers: launch | GetTurnDiff
+[HH:MM:SS INFO ] Triggers: launch | profile_menu | sign_out_dialog | manual_refresh | post_close
 ```
 
 ---
