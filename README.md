@@ -97,19 +97,12 @@ and fails on high-DPI screens. Screenshot scraping breaks on theme changes.
 
 ---
 
-## Five capture triggers
+## Two capture triggers
 
-| # | Trigger | When | Refresh before read? |
-|---|---------|------|----------------------|
-| 1 | **launch** | Antigravity process appears | Yes (3 s wait) |
-| 2 | **profile_menu** | Profile dropdown opens | Yes (3 s wait) |
-| 3 | **sign_out_dialog** | Sign-out confirmation dialog appears | Yes (3 s wait) |
-| 4 | **manual_refresh** | User clicks Refresh in Settings › Models | No (data already fresh) |
-| 5 | **safety_net** | Every 20 minutes while Antigravity is open | Yes (3 s wait) |
-| 6 | **manual_tray** | Tray menu "Capture Now" | Yes (3 s wait) |
-
-Trigger 4 is the only one that skips the Refresh step — the user just clicked
-it, so the data is already fresh.
+| Trigger | When | Action |
+|---------|------|--------|
+| **launch** | Antigravity opens | Baseline reading |
+| **GetTurnDiff** | Agent response completes | Capture with refresh |
 
 ---
 
@@ -154,7 +147,6 @@ Copy `notifier/config.example.env` to `notifier/.env` and edit values:
 | `CDP_PORT` | `9222` | Chrome DevTools Protocol port |
 | `POLL_INTERVAL_SECONDS` | `2` | How often to check for triggers |
 | `DEBOUNCE_SECONDS` | `2` | Min seconds between captures |
-| `SAFETY_NET_INTERVAL` | `1200` | Seconds between safety-net captures (default 20 min) |
 | `DASHBOARD_URL` | `http://localhost:4300` | Dashboard URL |
 | `DASHBOARD_API_KEY` | *(empty)* | Optional API key for remote access |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARN` / `ERROR` |
@@ -168,9 +160,6 @@ Copy `notifier/config.example.env` to `notifier/.env` and edit values:
 Antigravity only fetches quota from its servers when the Settings › Models
 panel is rendered. This tracker reads that data — it cannot retroactively
 recover quota data for time periods when Settings › Models was never displayed.
-
-The safety-net timer (every 20 minutes by default) bounds the worst-case
-staleness, but cannot fill gaps from sessions where the panel was never opened.
 
 ### Mac support is experimental
 
@@ -201,9 +190,7 @@ to update the parser.
 
 ### psutil required for launch and close triggers
 
-Without `psutil`, the process-detection triggers (launch and post-close) are
-silently disabled. The other three triggers (profile menu, sign-out dialog,
-safety-net timer) still work.
+Without `psutil`, the process-detection triggers (`launch` and `close` detection) are silently disabled. The `GetTurnDiff` network trigger still works as long as the CDP connection is established.
 
 ```bash
 pip install psutil

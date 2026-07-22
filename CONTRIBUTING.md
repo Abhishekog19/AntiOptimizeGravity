@@ -65,7 +65,6 @@ The key strings the parser currently looks for:
 | `Weekly Limit` | Per-section quota label |
 | `Five Hour Limit` | Per-section quota label |
 | `Refresh` | Button that refreshes server-side quota data |
-| `Sign out of` | Text in sign-out confirmation dialog (trigger) |
 
 If any of these have changed, the diagnostic report will show them as
 `MISSING` — that's exactly the information needed to fix the parser.
