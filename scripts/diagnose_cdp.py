@@ -1,7 +1,7 @@
-"""Diagnostic v2: verifies title-based panel detection on live CDP."""
+"""Diagnostic v2: verifies new title-based panel detection + trigger JS on live CDP."""
 import sys, json, urllib.request
 sys.path.insert(0, 'notifier')
-from notifier import _is_settings_panel, cdp_evaluate, _get_all_page_targets
+from notifier import _is_settings_panel, _TRIGGER_DETECT_JS, cdp_evaluate, _get_all_page_targets
 
 try:
     targets = _get_all_page_targets(9222)
@@ -26,6 +26,9 @@ for t in main_pages:
     print(f'  [{t["id"][:8]}] title={t.get("title","")!r}  url={t["url"][:70]}')
     ws = t.get('webSocketDebuggerUrl', '')
     if ws:
+        print(f'  Running trigger-detect JS...')
+        result = cdp_evaluate(t, _TRIGGER_DETECT_JS, timeout=5.0)
+        print(f'  trigger_result = {result!r}')
         title_r = cdp_evaluate(t, 'document.title', timeout=3.0)
         print(f'  document.title = {title_r!r}')
     else:

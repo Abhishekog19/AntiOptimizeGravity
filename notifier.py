@@ -1,19 +1,14 @@
 """
-notifier.py — Antigravity Quota Tracker v3
+notifier.py - Antigravity Quota Tracker v4.0
 
-Polls every 2 seconds for the profile dropdown Sign Out button in Antigravity IDE.
-When the user clicks their profile icon, the dropdown renders a 'Sign Out'
-button element in the editor DOM. This notifier detects it via a targeted
-element query (NOT innerText scan) which is immune to false positives from
-chat/editor content.
+Two capture triggers
+─────────────────────
+  1. LAUNCH       Antigravity process appears   → Refresh + read
+  2. GetTurnDiff  Agent response completes      → Refresh + read
 
-At that moment this script silently:
-  1. Reads the account email from the dropdown DOM (near the Sign Out button)
-  2. Uses the Settings > Models page (settingsScreen CDP target) for quota
-  3. Clicks the last 'Refresh' button on the Models panel
-  4. Waits 3 s, reads innerText, parses quota percentages + reset countdowns
-  5. POSTs the reading to the local dashboard at http://localhost:4300
-  6. Fires a Windows toast notification with the summary
+The GetTurnDiff trigger is implemented via a persistent CDP Network domain
+listener on the main workbench window. See notifier/notifier.py for the
+full implementation. This file is a simplified standalone version.
 
 Prerequisites:
   * Antigravity IDE launched with --remote-debugging-port=9222
@@ -32,7 +27,7 @@ Usage:
 
 CDP_PORT       = 9222
 DASHBOARD_URL  = "http://localhost:4300"
-POLL_INTERVAL  = 2          # seconds between DOM checks
+POLL_INTERVAL  = 2          # seconds between process state checks
 DEBOUNCE       = 30         # minimum seconds between captures
 
 # JS expression evaluated in each editor page target every POLL_INTERVAL.

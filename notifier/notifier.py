@@ -1,36 +1,31 @@
 #!/usr/bin/env python3
 """
-notifier/notifier.py  —  Antigravity Quota Tracker v3.0
+notifier/notifier.py  —  Antigravity Quota Tracker v4.0
 
-Five capture triggers
-─────────────────────
-  1. LAUNCH        Antigravity process appears   → Refresh + read
-  2. PROFILE_MENU  Profile dropdown opens        → Refresh + read
-  3. SIGN_OUT      Sign-out dialog appears       → Refresh + wait 3s + read
-  4. MANUAL        User clicked Refresh in UI    → read immediately (already fresh)
-  5. POST_CLOSE    Antigravity process exits     → relaunch silently, Refresh, read, kill
-
-Trigger 4 is the only one that skips the Refresh step because the user just
-clicked it — the data is already fresh.  All other triggers click Refresh and
-wait 3 s to ensure they read the latest server-side data.
+Two capture triggers
+────────────────────
+  1. LAUNCH       Antigravity process appears   → Refresh + read
+  2. GetTurnDiff  Agent response completes      → Refresh + read
 
 Architecture
 ────────────
-  • CdpSession  — persistent stdlib WebSocket to the settingsScreen target.
-                  Reconnects automatically when the connection drops.
-                  One connection is maintained and reused for all quota reads.
-  • One-shot cdp_evaluate()  — for the cheap 2-second poll on transient
-                               editor page targets (profile menu / sign-out).
-  • CHEAP_TRIGGER_JS  — minimal querySelectorAll, single CDP round-trip/poll.
-  • Structured logging  — levels DEBUG/INFO/WARN/ERROR, ASCII-safe terminal.
-  • Heartbeat  — POST /api/heartbeat every 15 s so the dashboard can show a
-                 live / stale / offline status dot.
+  • CdpSession       — persistent stdlib WebSocket to the settingsScreen target.
+                       Reconnects automatically when the connection drops.
+                       One connection is maintained and reused for all quota reads.
+  • NetworkListener  — persistent CDP WebSocket to the main workbench window.
+                       Enables the Network domain and listens for requestWillBeSent
+                       events.  Fires on_getturndiff() when GetTurnDiff appears in
+                       the request URL.  A 500 ms debounce collapses the two rapid
+                       GetTurnDiff calls emitted per agent response into one capture.
+  • Heartbeat        — POST /api/heartbeat every 15 s so the dashboard can show a
+                       live / stale / offline status dot.
+  • Structured logging — levels DEBUG/INFO/WARN/ERROR, ASCII-safe terminal.
 
 Configuration  (notifier/.env  or  environment variables)
 ──────────────
   CDP_PORT                  9222
   POLL_INTERVAL_SECONDS     2
-  DEBOUNCE_SECONDS          30
+  DEBOUNCE_SECONDS          2
   DASHBOARD_URL             http://localhost:4300
   DASHBOARD_API_KEY         (empty = open)
   LOG_LEVEL                 INFO   (DEBUG | INFO | WARN | ERROR)
@@ -38,16 +33,8 @@ Configuration  (notifier/.env  or  environment variables)
 Usage
 ─────
   python notifier/notifier.py              # live mode
-  python notifier/notifier.py --dry-run    # log only, no POST / toasts
-  python notifier/notifier.py --verbose    # DEBUG-level logging
-
-Known limitation — post-close accuracy
-───────────────────────────────────────
-  When Antigravity exits, this notifier relaunches it in the background,
-  navigates to Settings > Models, reads the quota (Refresh + 3 s wait),
-  then terminates the relaunched instance.  The Settings panel may briefly
-  flash on screen if Electron's Browser.setWindowBounds is unavailable.
-  See README.md § "Known Limitations" for details.
+  python notifier/notifier.py --dry-run   # log only, no POST / toasts
+  python notifier/notifier.py --verbose   # DEBUG-level logging
 """
 
 # ── stdlib ───────────────────────────────────────────────────────────────────
@@ -56,7 +43,7 @@ import sys, os, time, json, re, datetime, threading, subprocess
 import urllib.request, urllib.error
 import struct, socket, base64
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 
 # ── Optional dependencies ─────────────────────────────────────────────────────
 try:
@@ -120,16 +107,20 @@ def _cfg(key: str, default):
             return default
     return val
 
-CDP_PORT           = _cfg("CDP_PORT",                  9222)
-POLL_INTERVAL      = _cfg("POLL_INTERVAL_SECONDS",     2)
-DEBOUNCE           = _cfg("DEBOUNCE_SECONDS",          2)   # 2s: re-arm quickly after capture
-DASHBOARD_URL      = _cfg("DASHBOARD_URL",             "http://localhost:4300")
-DASHBOARD_API_KEY  = _cfg("DASHBOARD_API_KEY",         "")
-LOG_LEVEL          = _cfg("LOG_LEVEL",                 "INFO").upper()
+CDP_PORT           = _cfg("CDP_PORT",                 9222)
+POLL_INTERVAL      = _cfg("POLL_INTERVAL_SECONDS",    2)
+DEBOUNCE           = _cfg("DEBOUNCE_SECONDS",         2)   # between captures
+DASHBOARD_URL      = _cfg("DASHBOARD_URL",            "http://localhost:4300")
+DASHBOARD_API_KEY  = _cfg("DASHBOARD_API_KEY",        "")
+LOG_LEVEL          = _cfg("LOG_LEVEL",                "INFO").upper()
 
-HEARTBEAT_INTERVAL = 15    # seconds between heartbeat POSTs
-RELAUNCH_TIMEOUT   = 30    # kept for CDP wait helper (used by ensure_settings_open)
-RELAUNCH_SETTLE    = 3     # seconds to wait for UI to settle after launch
+HEARTBEAT_INTERVAL  = 15   # seconds between heartbeat POSTs
+RELAUNCH_SETTLE     = 3    # seconds to wait for CDP to stabilise after launch
+RELAUNCH_TIMEOUT    = 30   # kept for CDP wait helper (ensure_settings_open)
+
+# GetTurnDiff fires exactly twice per completed agent response.
+# 500 ms debounce collapses the pair into a single capture event.
+GETTURNDIFF_DEBOUNCE = 0.5  # seconds
 
 DRY_RUN = "--dry-run" in sys.argv
 VERBOSE  = "--verbose" in sys.argv or LOG_LEVEL == "DEBUG"
@@ -252,32 +243,20 @@ def _get_all_page_targets(port: int = CDP_PORT) -> list:
 def check_cdp_port(port: int = CDP_PORT) -> str:
     """
     Probe port and return a status string:
-      'ok'            — port is open AND returning valid CDP JSON
-      'conflict'      — port is open but NOT returning valid CDP JSON
-                        (some other HTTP server is occupying the port)
-      'not_open'      — connection refused (Antigravity not running with the flag)
-
-    'Conflict' detection logic: a valid CDP /json response is a JSON *list* whose
-    items are dicts that each have a 'webSocketDebuggerUrl' key.  If the response
-    is not a list, or the list is empty, or items lack that key, we classify it as
-    a conflict rather than valid CDP.  This prevents mis-classifying a successful
-    response from an unrelated HTTP service as "CDP is working".
+      'ok'       — port is open AND returning valid CDP JSON
+      'conflict' — port is open but NOT returning valid CDP JSON
+      'not_open' — connection refused (Antigravity not running with the flag)
     """
     try:
         data = _http_get_json(f"http://localhost:{port}/json", timeout=3.0)
-        # Valid CDP: must be a list of target dicts with webSocketDebuggerUrl
         if not isinstance(data, list):
             return "conflict"
-        # An empty list is fine — Antigravity may be loading (no pages yet).
-        # But if items exist and none have webSocketDebuggerUrl, it's not CDP.
         if data and not any("webSocketDebuggerUrl" in t for t in data if isinstance(t, dict)):
             return "conflict"
         return "ok"
     except (OSError, ConnectionRefusedError):
         return "not_open"
     except Exception:
-        # Timeout, non-JSON response, etc. — treat as conflict (something responded
-        # but it wasn't CDP-shaped).
         return "conflict"
 
 
@@ -382,7 +361,7 @@ def _ws_eval_stdlib(ws_url: str, expression: str, timeout: float = 8.0):
                 continue
             flen = struct.unpack("!Q", raw[2:10])[0]
             off  = 10
-        if b1 & 0x80:  # masked frame (server → client should NOT be masked, but handle it)
+        if b1 & 0x80:  # masked frame
             off += 4
         if len(raw) >= off + flen:
             resp = json.loads(raw[off:off + flen].decode("utf-8"))
@@ -433,8 +412,7 @@ class CdpSession:
         self._sock: Optional[socket.socket] = None
         self._lock    = threading.Lock()
         self._next_id = 1
-        self._pending: dict = {}   # msg_id → {"event": Event, "response": Any}
-        self._event_handlers: dict = {} # method_name -> list of callbacks
+        self._pending: dict = {}   # msg_id → {"event": Event, "value": Any}
         self._closed  = False
         self._recv_th: Optional[threading.Thread] = None
 
@@ -511,17 +489,10 @@ class CdpSession:
                         msg_id = msg.get("id")
                         if msg_id and msg_id in self._pending:
                             entry = self._pending[msg_id]
-                            entry["response"] = msg
+                            entry["value"] = (
+                                msg.get("result", {}).get("result", {}).get("value")
+                            )
                             entry["event"].set()
-                        method = msg.get("method")
-                        if method:
-                            with self._lock:
-                                handlers = list(self._event_handlers.get(method, []))
-                            for cb in handlers:
-                                try:
-                                    cb(msg.get("params", {}))
-                                except Exception as e:
-                                    log(f"Error in event handler for {method}: {e}", level="WARN")
                     except Exception:
                         pass
             except socket.timeout:
@@ -565,7 +536,7 @@ class CdpSession:
                     sock   = self._sock
                     msg_id = self._next_id
                     self._next_id += 1
-                    entry  = {"event": threading.Event(), "response": None}
+                    entry  = {"event": threading.Event(), "value": None}
                     self._pending[msg_id] = entry
 
                 payload = json.dumps({
@@ -579,10 +550,7 @@ class CdpSession:
                 self._send_frame(sock, payload)
 
                 if entry["event"].wait(timeout):
-                    resp = self._pending.pop(msg_id, {}).get("response")
-                    if resp:
-                        return resp.get("result", {}).get("result", {}).get("value")
-                    return None
+                    return self._pending.pop(msg_id, {}).get("value")
                 self._pending.pop(msg_id, None)
                 return None
 
@@ -592,49 +560,6 @@ class CdpSession:
                     self._sock = None
                 time.sleep(min(2 ** attempt, 5))
         return None
-
-    def call_method(self, method: str, params: Optional[dict] = None, timeout: float = 8.0):
-        """
-        Execute a CDP method and return its result dict.
-        """
-        if params is None:
-            params = {}
-        for attempt in range(3):
-            try:
-                with self._lock:
-                    self._ensure_connected()
-                    sock   = self._sock
-                    msg_id = self._next_id
-                    self._next_id += 1
-                    entry  = {"event": threading.Event(), "response": None}
-                    self._pending[msg_id] = entry
-
-                payload = json.dumps({
-                    "id": msg_id, "method": method,
-                    "params": params,
-                }).encode("utf-8")
-                self._send_frame(sock, payload)
-
-                if entry["event"].wait(timeout):
-                    resp = self._pending.pop(msg_id, {}).get("response")
-                    if resp:
-                        return resp.get("result")
-                    return None
-                self._pending.pop(msg_id, None)
-                return None
-
-            except Exception as exc:
-                log(f"CdpSession.call_method ({method}, attempt {attempt + 1}): {exc}", level="DEBUG")
-                with self._lock:
-                    self._sock = None
-                time.sleep(min(2 ** attempt, 5))
-        return None
-
-    def register_handler(self, method: str, callback) -> None:
-        with self._lock:
-            if method not in self._event_handlers:
-                self._event_handlers[method] = []
-            self._event_handlers[method].append(callback)
 
     def navigate_settings(self, screen: str = "Models") -> None:
         """Navigate the Settings target to a specific screen via history.pushState."""
@@ -711,8 +636,8 @@ def ensure_settings_open(port: int = CDP_PORT) -> Optional[CdpSession]:
     history.pushState, waits up to 5 s for the target to appear, then
     returns a session.  Returns None if all attempts fail.
 
-    Used by the launch and post_close triggers which need to open Settings
-    programmatically when the user may not have it open.
+    Used by the launch trigger which needs to open Settings programmatically
+    when the user may not have it open.
     """
     # Fast path: settings already open
     existing = get_settings_session()
@@ -724,7 +649,7 @@ def ensure_settings_open(port: int = CDP_PORT) -> Optional[CdpSession]:
     # Find any editor page to navigate
     pages = _get_all_page_targets(port)
     editor = next(
-        (t for t in pages if "settingsScreen" not in t.get("url", "")), None
+        (t for t in pages if not _is_settings_panel(t)), None
     )
     if not editor:
         log("  No editor pages available to open Settings", level="WARN")
@@ -754,93 +679,260 @@ def ensure_settings_open(port: int = CDP_PORT) -> Optional[CdpSession]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Silent window minimisation (best-effort)
+# NetworkListener — persistent CDP WebSocket to the main workbench window
 # ─────────────────────────────────────────────────────────────────────────────
 
-def try_minimize_settings(target: dict) -> bool:
+class NetworkListener:
     """
-    Attempt to minimise the Settings window via CDP Browser.setWindowBounds.
+    Persistent CDP WebSocket connection to the main workbench window.
 
-    This works only if Antigravity's Electron build exposes the Browser domain.
-    If it doesn't, the window will be briefly visible — that is expected and
-    documented behaviour.  Returns True if minimised, False otherwise.
+    Enables the Network domain and fires the provided callback whenever a
+    Network.requestWillBeSent event contains 'GetTurnDiff' in the request URL.
+
+    Design
+    ──────
+    • A single open socket is maintained.
+    • Network.enable is sent immediately after the WebSocket handshake.
+    • A background thread reads ALL incoming CDP frames (events and responses).
+    • CDP events have a 'method' field (not 'id').  Only
+      Network.requestWillBeSent events that include 'GetTurnDiff' in
+      params.request.url trigger the callback.
+    • close() stops the reader thread and closes the socket.
+
+    Note: every agent response emits exactly two rapid GetTurnDiff requests.
+    The caller is expected to debounce (see _on_getturndiff_event).
     """
-    ws_url = target.get("webSocketDebuggerUrl")
-    if not ws_url:
-        return False
-    try:
-        m    = re.match(r"ws://([^/:]+):?(\d+)?(/.*)?", ws_url)
+
+    def __init__(self, ws_url: str, on_getturndiff: Callable[[], None]) -> None:
+        self._ws_url        = ws_url
+        self._on_getturndiff = on_getturndiff
+        self._sock: Optional[socket.socket] = None
+        self._closed        = False
+        self._next_id       = 1
+        self._connect()
+
+    def _connect(self) -> None:
+        m    = re.match(r"ws://([^/:]+):?(\d+)?(/.*)?", self._ws_url)
         host = m.group(1)
         port = int(m.group(2) or 80)
         path = m.group(3) or "/"
-        key  = base64.b64encode(b"AntigravityMinimize").decode()
+        key  = base64.b64encode(b"AntigravityNetListen").decode()
         hs   = (
-            f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
             "Upgrade: websocket\r\nConnection: Upgrade\r\n"
             f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
         )
-        sock = socket.create_connection((host, port), timeout=5)
+        sock = socket.create_connection((host, port), timeout=10)
         sock.sendall(hs.encode())
-        buf  = b""
+        buf = b""
         while b"\r\n\r\n" not in buf:
-            buf += sock.recv(4096)
+            chunk = sock.recv(4096)
+            if not chunk:
+                sock.close()
+                raise ConnectionError("NetworkListener: WebSocket handshake failed")
+            buf += chunk
+        self._sock = sock
 
-        def _send(d: dict) -> None:
-            data   = json.dumps(d).encode("utf-8")
-            mask   = b"\x01\x02\x03\x04"
-            masked = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
-            plen   = len(data)
-            hdr    = (struct.pack("!BBH", 0x81, 0xFE, plen) if plen > 125
-                      else struct.pack("!BB", 0x81, 0x80 | plen)) + mask
-            sock.sendall(hdr + masked)
+        # Enable Network domain — must be sent before events start flowing
+        self._send_frame(
+            sock,
+            json.dumps({
+                "id": self._next_id,
+                "method": "Network.enable",
+                "params": {},
+            }).encode("utf-8"),
+        )
+        self._next_id += 1
 
-        def _recv(t: float = 3.0) -> dict:
-            sock.settimeout(t)
-            raw = b""
-            dl  = time.time() + t
-            while time.time() < dl:
-                try:
-                    raw += sock.recv(65536)
-                except socket.timeout:
+        # Start the background reader thread
+        threading.Thread(
+            target=self._recv_loop, daemon=True, name="NetListener"
+        ).start()
+        log("NetworkListener: connected and Network domain enabled", level="DEBUG")
+
+    @staticmethod
+    def _send_frame(sock: socket.socket, data: bytes) -> None:
+        mask   = b"\x05\x06\x07\x08"
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+        plen   = len(data)
+        if plen <= 125:
+            header = struct.pack("!BB", 0x81, 0x80 | plen) + mask
+        elif plen <= 65535:
+            header = struct.pack("!BBH", 0x81, 0xFE, plen) + mask
+        else:
+            header = struct.pack("!BBQ", 0x81, 0xFF, plen) + mask
+        sock.sendall(header + masked)
+
+    def _recv_loop(self) -> None:
+        """
+        Background reader: parse all incoming CDP frames and dispatch events.
+
+        CDP events do NOT have an 'id' field — they have 'method' and 'params'.
+        We look specifically for Network.requestWillBeSent events that include
+        'GetTurnDiff' in the request URL.
+        """
+        my_sock = self._sock
+        raw     = b""
+        while not self._closed and my_sock is self._sock:
+            try:
+                my_sock.settimeout(1.0)
+                chunk = my_sock.recv(65536)
+                if not chunk:
                     break
-                if len(raw) < 2:
-                    continue
-                b1   = raw[1]
-                flen = b1 & 0x7F
-                off  = 2
-                if flen == 126:
-                    if len(raw) < 4:
-                        continue
-                    flen = struct.unpack("!H", raw[2:4])[0]
-                    off  = 4
-                if len(raw) >= off + flen:
-                    return json.loads(raw[off:off + flen].decode())
-            return {}
+                raw += chunk
+                # Consume all complete WebSocket frames in the buffer
+                while True:
+                    if len(raw) < 2:
+                        break
+                    b1   = raw[1]
+                    flen = b1 & 0x7F
+                    off  = 2
+                    if flen == 126:
+                        if len(raw) < 4:
+                            break
+                        flen = struct.unpack("!H", raw[2:4])[0]
+                        off  = 4
+                    elif flen == 127:
+                        if len(raw) < 10:
+                            break
+                        flen = struct.unpack("!Q", raw[2:10])[0]
+                        off  = 10
+                    if b1 & 0x80:   # server → client frames should not be masked,
+                        off += 4    # but handle gracefully if they are
+                    if len(raw) < off + flen:
+                        break
+                    frame = raw[off:off + flen]
+                    raw   = raw[off + flen:]
+                    try:
+                        msg = json.loads(frame.decode("utf-8"))
+                        # CDP events: 'method' present, no 'id'
+                        if (msg.get("method") == "Network.requestWillBeSent"
+                                and "id" not in msg):
+                            url = (
+                                msg.get("params", {})
+                                   .get("request", {})
+                                   .get("url", "")
+                            )
+                            if "GetTurnDiff" in url:
+                                log(
+                                    f"NetworkListener: GetTurnDiff → {url[:80]}",
+                                    level="DEBUG",
+                                )
+                                self._on_getturndiff()
+                    except Exception:
+                        pass
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+        log("NetworkListener: connection dropped", level="DEBUG")
 
-        _send({"id": 1, "method": "Browser.getWindowForTarget"})
-        resp      = _recv()
-        window_id = resp.get("result", {}).get("windowId")
-        if window_id is None:
-            sock.close()
-            return False
-
-        _send({"id": 2, "method": "Browser.setWindowBounds",
-               "params": {"windowId": window_id, "bounds": {"windowState": "minimized"}}})
-        _recv()
-        sock.close()
-        log("Settings window minimised via Browser.setWindowBounds", level="DEBUG")
-        return True
-    except Exception as exc:
-        log(f"Cannot minimise window (Browser domain not exposed): {exc}", level="WARN")
-        log("Settings panel may be briefly visible — expected on some Electron builds.", level="WARN")
-        return False
+    def close(self) -> None:
+        self._closed = True
+        if self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JS expressions
+# Network listener management (module-level singleton)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Click the last Refresh button (= Models section).
+_network_listener: Optional[NetworkListener] = None
+_network_listener_lock = threading.Lock()
+_last_getturndiff: float = 0.0
+
+
+def _on_getturndiff_event() -> None:
+    """
+    Called on every GetTurnDiff network request.
+
+    Antigravity fires exactly two rapid GetTurnDiff requests per completed
+    agent response.  The 500 ms debounce collapses the pair into a single
+    capture event so the dashboard receives one reading per response.
+    """
+    global _last_getturndiff
+    now = time.time()
+    if now - _last_getturndiff < GETTURNDIFF_DEBOUNCE:
+        log(
+            "GetTurnDiff: debounced (second fire of response pair — skipping)",
+            level="DEBUG",
+        )
+        return
+    _last_getturndiff = now
+    log("Trigger: GetTurnDiff (agent response completed)")
+    _fire_capture("GetTurnDiff", needs_refresh=True)
+
+
+def setup_network_listener() -> Optional[NetworkListener]:
+    """
+    Connect to the main workbench window CDP target and enable the Network domain.
+
+    Finds a non-Settings page target (the main workbench window), opens a
+    persistent NetworkListener, and registers _on_getturndiff_event as the
+    GetTurnDiff callback.
+
+    Returns the NetworkListener on success, or None if no workbench target is
+    found (e.g. Antigravity is still starting up — the caller will retry on the
+    next poll cycle).
+    """
+    global _network_listener
+    with _network_listener_lock:
+        # Return existing listener if still alive
+        if (_network_listener is not None
+                and not _network_listener._closed
+                and _network_listener._sock is not None):
+            return _network_listener
+
+        # Find the main workbench window (any page that is NOT the Settings panel)
+        pages = _get_all_page_targets(CDP_PORT)
+        workbench = next((t for t in pages if not _is_settings_panel(t)), None)
+        if not workbench:
+            log(
+                "NetworkListener: no workbench target found — will retry",
+                level="DEBUG",
+            )
+            return None
+
+        ws_url = workbench.get("webSocketDebuggerUrl", "")
+        if not ws_url:
+            log("NetworkListener: workbench target has no webSocketDebuggerUrl", level="WARN")
+            return None
+
+        try:
+            _network_listener = NetworkListener(ws_url, _on_getturndiff_event)
+            log(
+                f"NetworkListener: listening on {workbench.get('url', '')[:60]!r}"
+            )
+            return _network_listener
+        except Exception as exc:
+            log(f"NetworkListener: connection failed: {exc}", level="WARN")
+            _network_listener = None
+            return None
+
+
+def teardown_network_listener() -> None:
+    """Close and discard the persistent network listener (e.g. on process exit)."""
+    global _network_listener
+    with _network_listener_lock:
+        if _network_listener:
+            try:
+                _network_listener.close()
+            except Exception:
+                pass
+            _network_listener = None
+    log("NetworkListener: torn down")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JS expressions (quota read only — trigger detection JS removed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Click the last Refresh button (= Models section, not MCP).
 _REFRESH_JS = r"""
 (function() {
     var btns = Array.from(document.querySelectorAll('button'))
@@ -1068,7 +1160,7 @@ def post_heartbeat(status: str = "live") -> None:
             "lastCaptureAt": _hb["last_capture_at"],
             "triggerCount":  _hb["trigger_count"],
             "lastTrigger":   _hb["last_trigger"],
-            "version":       "3.0.0",
+            "version":       "4.0.0",
         },
         timeout=4.0,
     )
@@ -1116,7 +1208,7 @@ _capture_state = {
     "last_capture_ts": 0.0,   # time.time() of last successful capture (for debounce)
 }
 
-# Bug B fix: single non-blocking lock — only ONE capture thread may run at a time.
+# Single non-blocking lock — only ONE capture thread may run at a time.
 # _fire_capture() calls acquire(blocking=False); if it fails it logs + returns.
 _capture_lock = threading.Lock()
 
@@ -1128,12 +1220,12 @@ def run_capture_sequence(trigger: str, needs_refresh: bool = True,
 
     Args
     ────
-    trigger        One of: launch | profile_menu | sign_out_dialog |
-                            manual_refresh | post_close
+    trigger        One of: launch | GetTurnDiff | manual_tray
     needs_refresh  True  → click Refresh and wait 3 s before reading quota.
-                   False → data is already fresh (manual_refresh trigger only).
-    session        Pre-existing CdpSession (for post_close relaunch).
-                   If None, one is obtained from get_settings_session().
+                   False → data is already fresh (unused in the two-trigger model,
+                           retained for manual_tray compatibility).
+    session        Pre-existing CdpSession (rarely needed). If None, one is
+                   obtained from ensure_settings_open().
     """
     # Lock is already held by our caller (_fire_capture); nothing to set here.
     captured_at = datetime.datetime.now()
@@ -1142,17 +1234,17 @@ def run_capture_sequence(trigger: str, needs_refresh: bool = True,
     log(f"== Capture [{trigger}] started ==================================")
     try:
         # 1. Acquire Settings session.
-        #    For launch / post_close triggers the Settings panel may not be open
-        #    yet, so ensure_settings_open() tries to open it via CDP.
+        #    For the launch trigger the Settings panel may not be open yet,
+        #    so ensure_settings_open() tries to open it via CDP.
         sess = session or ensure_settings_open()
         if sess is None:
-            if trigger in ("launch", "ghost_settings"):
+            if trigger == "launch":
                 # At launch time the Settings panel is not yet open — this is
-                # normal behaviour, not an error.  The safety-net / profile-menu
-                # / sign-out triggers will capture once the user opens Settings.
+                # normal behaviour.  The GetTurnDiff trigger will capture once
+                # the user sends a message.
                 log(
-                    f"  [{trigger}] Settings panel not open yet — skipping. "
-                    "Will capture automatically when Settings is opened.",
+                    f"  [launch] Settings panel not open yet — skipping. "
+                    "Will capture automatically on next agent response (GetTurnDiff).",
                     level="INFO",
                 )
             else:
@@ -1172,13 +1264,13 @@ def run_capture_sequence(trigger: str, needs_refresh: bool = True,
         sess.navigate_settings("Models")
         time.sleep(0.5)
 
-        # 4. Click Refresh (all triggers except manual_refresh)
+        # 4. Click Refresh and wait 3 s for fresh server-side data
         if needs_refresh:
             clicked = sess.evaluate(_REFRESH_JS)
             log(f"  Refresh clicked: {clicked}  (waiting 3 s for fresh data...)")
             time.sleep(3.0)
         else:
-            log("  Skipping Refresh — data already fresh from manual click")
+            log("  Skipping Refresh — data already fresh")
 
         # 5. Read and parse quota
         text  = sess.get_innertext()
@@ -1239,10 +1331,10 @@ def _fire_capture(trigger: str, needs_refresh: bool = True) -> None:
     Debounce guard + single-capture-at-a-time enforcement, then launch in a
     daemon thread.
 
-    Bug A fix: debounce uses time.time() delta (unchanged).
-    Bug B fix: _capture_lock.acquire(blocking=False) ensures only one capture
-               thread runs at a time.  A second concurrent trigger is logged
-               and dropped — not queued — so the watcher stays responsive.
+    Debounce uses time.time() delta against _capture_state["last_capture_ts"].
+    _capture_lock.acquire(blocking=False) ensures only one capture thread runs
+    at a time.  A second concurrent trigger is logged and dropped — not queued
+    — so the watcher stays responsive.
     """
     elapsed = time.time() - _capture_state["last_capture_ts"]
     if elapsed < DEBOUNCE:
@@ -1267,20 +1359,16 @@ def fire_capture(trigger: str = "manual_tray", needs_refresh: bool = True) -> No
 
     trigger       Identifier shown in the activity log.
     needs_refresh True = click the Refresh button before reading quota.
-                  All five CDP triggers except manual_refresh use True.
     """
     _fire_capture(trigger, needs_refresh)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Process monitor — psutil-based (launch + post-close triggers)
+# Process monitor — psutil-based (launch + close detection)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Names / exe substrings that identify the Antigravity process.
 _AG_NAMES = ["Antigravity IDE", "Antigravity", "antigravity"]
-
-# Handle for the process we relaunched ourselves (excluded from detection).
-_relaunch_proc: Optional[subprocess.Popen] = None
 
 
 def find_antigravity_process() -> Optional["psutil.Process"]:  # type: ignore[name-defined]
@@ -1292,8 +1380,6 @@ def find_antigravity_process() -> Optional["psutil.Process"]:  # type: ignore[na
             name = proc.info.get("name") or ""
             exe  = proc.info.get("exe")  or ""
             if any(ag in name or ag in exe for ag in _AG_NAMES):
-                if _relaunch_proc and proc.pid == _relaunch_proc.pid:
-                    continue   # skip our own relaunch
                 return proc
     except (_psutil.NoSuchProcess, _psutil.AccessDenied):
         pass
@@ -1313,145 +1399,20 @@ def _get_exe_and_args(proc: "psutil.Process") -> tuple:  # type: ignore[name-def
         return "", []
 
 
-def _wait_for_cdp(port: int = CDP_PORT, timeout: float = RELAUNCH_TIMEOUT) -> bool:
-    """Poll until CDP is reachable. Returns True on success."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            _http_get_json(f"http://localhost:{port}/json", timeout=2.0)
-            return True
-        except Exception:
-            time.sleep(1.0)
-    return False
-
-
-def _open_settings_after_relaunch(port: int = CDP_PORT) -> Optional[CdpSession]:
-    """
-    After relaunching Antigravity, navigate to Settings > Models and return
-    a CdpSession.  Falls back gracefully if navigation fails.
-    """
-    # Wait up to 20 s for page targets to appear
-    targets  = []
-    deadline = time.time() + 20
-    while time.time() < deadline:
-        targets = _get_all_page_targets(port)
-        if targets:
-            break
-        time.sleep(1)
-
-    if not targets:
-        log("  Relaunch: no CDP page targets appeared", level="WARN")
-        return None
-
-    # If settingsScreen already opened automatically, use it directly
-    settings_t = find_settings_target(port)
-    if settings_t:
-        ws_url = settings_t.get("webSocketDebuggerUrl")
-        if ws_url:
-            return CdpSession(ws_url)
-
-    # Try navigating an editor target to the Settings URL
-    targets = _get_all_page_targets(CDP_PORT)
-    # Use the main editor window (not the Settings panel) to push the URL change
-    editor = next((t for t in targets if not _is_settings_panel(t)), None)
-    if editor:
-        cdp_evaluate(editor, "history.pushState({}, '', '/?settingsScreen=Models')")
-        time.sleep(2)
-        settings_t = find_settings_target(port)
-        if settings_t:
-            ws_url = settings_t.get("webSocketDebuggerUrl")
-            if ws_url:
-                return CdpSession(ws_url)
-
-    log("  Relaunch: could not open Settings > Models — capture skipped", level="WARN")
-    return None
-
-
-def relaunch_and_capture(exe_path: str, original_args: list) -> None:
-    """
-    Post-close trigger: briefly relaunch Antigravity to capture the final
-    quota snapshot, then terminate the relaunched instance.
-
-    Flow
-    ────
-    1. Append --remote-debugging-port if not already present in args.
-    2. Launch the process (minimised window if possible on Windows).
-    3. Wait for CDP to become available (up to RELAUNCH_TIMEOUT s).
-    4. Minimise the Settings window via Browser.setWindowBounds (best-effort).
-    5. Navigate to Settings > Models, run capture sequence.
-    6. Terminate the relaunched process.
-    """
-    global _relaunch_proc
-    log("Post-close trigger: relaunching Antigravity for final quota capture...")
-    log(
-        "NOTE: The Settings panel may flash briefly. See README.md § Known Limitations.",
-        level="INFO",
-    )
-
-    args     = list(original_args)
-    cdp_flag = f"--remote-debugging-port={CDP_PORT}"
-    if not any("remote-debugging-port" in a for a in args):
-        args.append(cdp_flag)
-
-    try:
-        # Launch — suppress console window on Windows
-        kwargs: dict = {}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        _relaunch_proc = subprocess.Popen([exe_path] + args, **kwargs)
-        log(f"  Relaunched: PID {_relaunch_proc.pid}", level="DEBUG")
-
-        if not _wait_for_cdp(CDP_PORT, RELAUNCH_TIMEOUT):
-            log("  CDP did not become available within timeout", level="ERROR")
-            return
-        log("  CDP available after relaunch")
-        time.sleep(RELAUNCH_SETTLE)
-
-        # Minimise window (best-effort)
-        settings_t = find_settings_target()
-        if settings_t:
-            try_minimize_settings(settings_t)
-
-        # Navigate and capture
-        sess = _open_settings_after_relaunch()
-        if sess:
-            run_capture_sequence("post_close", needs_refresh=True, session=sess)
-            sess.close()
-        else:
-            log("  Post-close capture: could not get Settings session", level="ERROR")
-            toast("Post-close capture failed: could not open Settings > Models")
-
-    except Exception as exc:
-        log(f"  Relaunch error: {exc}", level="ERROR")
-    finally:
-        if _relaunch_proc:
-            try:
-                _relaunch_proc.terminate()
-                _relaunch_proc.wait(timeout=10)
-                log("  Relaunched Antigravity terminated")
-            except Exception:
-                try:
-                    _relaunch_proc.kill()
-                except Exception:
-                    pass
-            _relaunch_proc = None
-
-
-# Triggers: launch | GetTurnDiff
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Main polling loop (v4 — edge detection, safety net, notification on close)
+# Main polling loop — two triggers: launch + GetTurnDiff
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     mode = "DRY-RUN" if DRY_RUN else "LIVE"
-    log(f"Antigravity Quota Tracker v3.0  [{mode}]")
-    log(f"CDP={CDP_PORT}  poll={POLL_INTERVAL}s  debounce={DEBOUNCE}s  dashboard={DASHBOARD_URL}")
+    log(f"Antigravity Quota Tracker v4.0  [{mode}]")
+    log(f"CDP={CDP_PORT}  poll={POLL_INTERVAL}s  "
+        f"debounce(captures)={DEBOUNCE}s  debounce(GetTurnDiff)={GETTURNDIFF_DEBOUNCE}s  "
+        f"dashboard={DASHBOARD_URL}")
     log("Triggers: launch | GetTurnDiff")
     if not _HAS_PSUTIL:
         log(
-            "psutil not installed — launch and close triggers disabled. "
+            "psutil not installed — launch and close detection disabled. "
             "Run: pip install psutil",
             level="WARN",
         )
@@ -1460,127 +1421,97 @@ def main() -> None:
     # Start heartbeat thread
     threading.Thread(target=_heartbeat_loop, daemon=True, name="Heartbeat").start()
 
+    # ── Watcher state ─────────────────────────────────────────────────────────
     ag_was_running = False
-    main_sessions: dict = {}
-    state_vars = {"last_getturndiff": 0.0}
+    ag_exe: str    = ""
+    ag_args: list  = []
     no_cdp_warned_at = 0.0
 
     while True:
         try:
-            # Skip polling while a capture lock is held
-            if _capture_lock.locked():
-                time.sleep(POLL_INTERVAL)
-                continue
-
-            ag_proc = find_antigravity_process()
+            # ── 1. Process detection ──────────────────────────────────────────
+            ag_proc    = find_antigravity_process()
             ag_running = ag_proc is not None
-            ag_pid = ag_proc.pid if ag_proc else None
+            ag_pid     = ag_proc.pid if ag_proc else None
 
-            # Launch trigger
+            # Launch edge: was not running → now running
             if ag_running and not ag_was_running:
-                log(f"Antigravity detected: PID={ag_pid}")
+                ag_exe, ag_args = _get_exe_and_args(ag_proc)
+                log(f"Antigravity detected: PID={ag_pid}  exe={ag_exe[:60]!r}")
                 no_cdp_warned_at = 0.0
-                state_vars["last_getturndiff"] = 0.0
 
-                # Close any stale connections from previous processes
+                # Invalidate any stale Settings session from a previous process
                 invalidate_settings_session()
-                for _s in list(main_sessions.values()):
-                    try:
-                        _s.close()
-                    except Exception:
-                        pass
-                main_sessions.clear()
 
                 def _do_launch():
-                    time.sleep(RELAUNCH_SETTLE)
+                    time.sleep(RELAUNCH_SETTLE)  # let CDP stabilise
+                    setup_network_listener()
                     _fire_capture("launch", needs_refresh=True)
+
                 threading.Thread(target=_do_launch, daemon=True, name="Launch").start()
 
-            # Close detection
+            # Close edge: was running → now stopped
             if not ag_running and ag_was_running:
-                # Teardown connections
+                elapsed = time.time() - _capture_state["last_capture_ts"]
+                mins    = int(elapsed / 60)
+                log(f"Antigravity closed — last capture was {mins} minute(s) ago")
+                toast(
+                    f"Last quota captured {mins} min ago",
+                    title="Antigravity closed",
+                )
+                teardown_network_listener()
                 invalidate_settings_session()
-                for _s in list(main_sessions.values()):
-                    try:
-                        _s.close()
-                    except Exception:
-                        pass
-                main_sessions.clear()
-
-                elapsed_since_capture = time.time() - _capture_state["last_capture_ts"]
-                mins = int(elapsed_since_capture / 60)
-                msg = f"Antigravity closed — last capture was {mins} min ago"
-                log(msg)
-                toast(msg)
                 if _HAS_APP_STATE and _app_state:
-                    _app_state.log(msg, _app_state.LEVEL_WARN)
+                    _app_state.log(
+                        "Antigravity closed — reopen to continue tracking",
+                        _app_state.LEVEL_WARN,
+                    )
 
             ag_was_running = ag_running
 
-            # If running, maintain connections and network listeners
-            if ag_running:
-                pages = _get_all_page_targets(CDP_PORT)
-                main_pages = [t for t in pages if not _is_settings_panel(t)]
-                current_ids = {t.get("id") for t in main_pages}
-
-                # Clean up sessions for targets that disappeared
-                for gone_id in [k for k in list(main_sessions.keys()) if k not in current_ids]:
-                    try:
-                        main_sessions[gone_id].close()
-                    except Exception:
-                        pass
-                    del main_sessions[gone_id]
-
-                for target in main_pages:
-                    target_id = target.get("id", "")
-                    ws_url = target.get("webSocketDebuggerUrl", "")
-                    if not ws_url:
-                        continue
-
-                    # Connect or reuse CdpSession
-                    sess = main_sessions.get(target_id)
-                    if sess is None or sess._closed:
-                        try:
-                            sess = CdpSession(ws_url)
-                            main_sessions[target_id] = sess
-                            log(f"Main-window session connected id={target_id[:8]}", level="DEBUG")
-
-                            # Enable network domain
-                            sess.call_method("Network.enable")
-
-                            # Register GetTurnDiff event listener callback
-                            def on_request_will_be_sent(params):
-                                request = params.get("request", {})
-                                url = request.get("url", "")
-                                if "GetTurnDiff" in url:
-                                    now = time.time()
-                                    if now - state_vars["last_getturndiff"] < 0.5:
-                                        log("GetTurnDiff request debounced", level="DEBUG")
-                                        return
-                                    state_vars["last_getturndiff"] = now
-                                    log("Trigger: GetTurnDiff (network event detected)")
-                                    _fire_capture("GetTurnDiff", needs_refresh=True)
-
-                            sess.register_handler("Network.requestWillBeSent", on_request_will_be_sent)
-                        except Exception as exc:
-                            log(f"Main-window connection or Network setup failed: {exc}", level="DEBUG")
-
-            else:
-                # Not running warnings
+            # ── 2. CDP warnings when Antigravity is not running ───────────────
+            if not ag_running:
                 if time.time() - no_cdp_warned_at > 60:
                     port_status = check_cdp_port(CDP_PORT)
                     if port_status == "not_open":
                         log(
                             f"Antigravity process not found and port {CDP_PORT} is closed. "
-                            "Launch Antigravity via the debug shortcut.",
+                            "Launch Antigravity via the debug shortcut "
+                            "(run scripts/setup-windows.ps1 once if you haven't already).",
                             level="WARN",
                         )
                     elif port_status == "conflict":
                         log(
-                            f"Port {CDP_PORT} is open but is NOT responding with valid CDP JSON.",
+                            f"Port {CDP_PORT} is open but is NOT responding with valid CDP JSON. "
+                            "Something else is using this port. "
+                            "Either stop the conflicting service, or change CDP_PORT in notifier/.env "
+                            "and re-run the setup script with the matching --Port value.",
+                            level="WARN",
+                        )
+                    else:
+                        # Port is open and returning CDP data but psutil can't find the process
+                        log(
+                            f"CDP port {CDP_PORT} is responding but Antigravity process not detected by psutil. "
+                            "Triggers will not fire until the process is found. "
+                            "Verify the process name via Task Manager.",
                             level="WARN",
                         )
                     no_cdp_warned_at = time.time()
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            # ── 3. Ensure network listener is alive ───────────────────────────
+            # Re-establish the listener if it dropped (e.g. the workbench window
+            # was reloaded or a new target appeared after startup).
+            with _network_listener_lock:
+                listener_alive = (
+                    _network_listener is not None
+                    and not _network_listener._closed
+                    and _network_listener._sock is not None
+                )
+            if not listener_alive:
+                log("NetworkListener: not connected — attempting reconnect...", level="DEBUG")
+                setup_network_listener()
 
         except KeyboardInterrupt:
             raise

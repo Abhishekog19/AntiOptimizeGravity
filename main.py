@@ -6,7 +6,7 @@ Single entry point: python main.py
 Architecture
 ------------
   Thread 1   Flask server (daemon)        -> http://localhost:4300
-  Thread 2   CDP watcher (daemon)         -> 5 triggers, continuous loop
+  Thread 2   CDP watcher (daemon)         -> 2 triggers: launch + GetTurnDiff
   Main thread  pystray tray icon          -> left-click = open dashboard
   Subprocess   webview_launcher.py        -> native WebView2/WKWebView window
 
@@ -291,7 +291,7 @@ def _start_watcher() -> None:
     time.sleep(1.5)   # let Flask boot first
     try:
         from notifier import run_watcher
-        log.info("Starting CDP watcher (edge-detect triggers, debounce=2s)")
+        log.info("Starting CDP watcher (triggers: launch + GetTurnDiff)")
         run_watcher()
     except Exception as exc:
         log.error(f"CDP watcher crashed: {exc}", exc_info=True)
