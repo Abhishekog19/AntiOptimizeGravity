@@ -76,6 +76,13 @@ def _make_icon_image(color: tuple) -> "Image.Image":
 
 
 def _compute_icon_color(accounts: list) -> tuple:
+    """
+    Colour logic (worst-case across all accounts):
+      Green  — all accounts > 30% weekly remaining
+      Amber  — at least one account <= 30% (getting low)
+      Red    — at least one account <= 10% (critically low)
+      Grey   — no data yet
+    """
     if not accounts:
         return _COLOR_GREY
     pcts = [
@@ -87,10 +94,10 @@ def _compute_icon_color(accounts: list) -> tuple:
         return _COLOR_GREY
     min_pct = min(pcts)
     if min_pct <= 10:
-        return _COLOR_RED
+        return _COLOR_RED    # at least one account critically low
     if min_pct <= 30:
-        return _COLOR_AMBER
-    return _COLOR_GREEN
+        return _COLOR_AMBER  # at least one account running low
+    return _COLOR_GREEN      # all accounts healthy
 
 
 # ── Multi-monitor safe window position ────────────────────────────────────────
@@ -400,18 +407,35 @@ class TrayIcon:
         if not self._icon:
             return
         color = _compute_icon_color(accounts)
+        # Compute min pct for tooltip
+        pcts = [
+            a["latest"]["claude_weekly_pct"]
+            for a in accounts
+            if a.get("latest") and a["latest"].get("claude_weekly_pct") is not None
+        ]
+        min_pct = min(pcts) if pcts else None
+
         if color == self._current_color:
             return
         self._current_color = color
-        labels = {
-            _COLOR_GREEN: "All accounts healthy",
-            _COLOR_AMBER: "Some accounts running low",
-            _COLOR_RED:   "Accounts near-empty!",
-            _COLOR_GREY:  "No data yet",
-        }
+
+        if min_pct is not None:
+            label_map = {
+                _COLOR_GREEN: f"All accounts healthy (lowest: {min_pct:.0f}%)",
+                _COLOR_AMBER: f"Some accounts running low (lowest: {min_pct:.0f}%)",
+                _COLOR_RED:   f"Account critically low! (lowest: {min_pct:.0f}%)",
+                _COLOR_GREY:  "No quota data yet",
+            }
+        else:
+            label_map = {
+                _COLOR_GREEN: "All accounts healthy",
+                _COLOR_AMBER: "Some accounts running low",
+                _COLOR_RED:   "Account critically low!",
+                _COLOR_GREY:  "No quota data yet",
+            }
         try:
             self._icon.icon  = _make_icon_image(color)
-            self._icon.title = f"Antigravity Quota Tracker — {labels.get(color, '')}"
+            self._icon.title = f"Quota Tracker \u2014 {label_map.get(color, '')}"
         except Exception as exc:
             log.debug("Icon update failed: %s", exc)
 
@@ -484,7 +508,7 @@ class TrayIcon:
                 self.update_icon(app_state.get_accounts())
             except Exception as exc:
                 log.debug("Icon update error: %s", exc)
-            time.sleep(30)
+            time.sleep(5)   # 5 s — responsive to captures without burning CPU
 
     def _notify_startup(self) -> None:
         _show_toast(

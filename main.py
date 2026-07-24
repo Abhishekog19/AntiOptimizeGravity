@@ -211,9 +211,12 @@ def _register_windows_startup() -> None:
             watchdog_exe = Path(sys.executable).parent / "quota-watchdog.exe"
             cmd = f'"{watchdog_exe}"'
         else:
-            # Running from source
+            # Use pythonw.exe (same dir as python.exe) — no console window at boot
+            pythonw = Path(sys.executable).parent / "pythonw.exe"
+            if not pythonw.exists():
+                pythonw = Path(sys.executable)   # fallback if pythonw not found
             watchdog_script = _ROOT / "watchdog.py"
-            cmd = f'"{sys.executable}" "{watchdog_script}"'
+            cmd = f'"{pythonw}" "{watchdog_script}"'
 
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER, key_path,
