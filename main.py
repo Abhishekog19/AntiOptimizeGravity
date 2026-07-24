@@ -188,29 +188,57 @@ from state import app_state
 # ── Windows startup auto-registration ────────────────────────────────────────
 
 def _register_windows_startup() -> None:
-    """Add this script to Windows startup registry so it runs on login."""
+    """
+    Register watchdog.py (not main.py) in the Windows startup registry.
+
+    The watchdog runs at boot, watches for Antigravity IDE to open, and
+    launches the tracker automatically. This keeps startup lean: the tracker
+    only consumes resources while Antigravity is actually running.
+
+    Migration: also removes any stale AntigravityQuotaTracker entry that
+    registered main.py directly in older versions.
+    """
     if sys.platform != "win32":
         return
     try:
         import winreg
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-        app_name = "AntigravityQuotaTracker"
-        cmd = (f'"{sys.executable}"' if getattr(sys, "frozen", False)
-               else f'"{sys.executable}" "{str(_ROOT / "main.py")}"')
+        watchdog_name = "AntigravityQuotaWatchdog"
+        tracker_name  = "AntigravityQuotaTracker"   # legacy — remove if present
+
+        if getattr(sys, "frozen", False):
+            # Running as a packaged .exe — the watchdog exe lives alongside us
+            watchdog_exe = Path(sys.executable).parent / "quota-watchdog.exe"
+            cmd = f'"{watchdog_exe}"'
+        else:
+            # Running from source
+            watchdog_script = _ROOT / "watchdog.py"
+            cmd = f'"{sys.executable}" "{watchdog_script}"'
+
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER, key_path,
             0, winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
         )
+
+        # Remove stale legacy entry (main.py registered at startup)
         try:
-            existing, _ = winreg.QueryValueEx(key, app_name)
+            winreg.DeleteValue(key, tracker_name)
+            log.info(f"Removed legacy startup entry: {tracker_name}")
+        except FileNotFoundError:
+            pass
+
+        # Check if watchdog entry is already correct
+        try:
+            existing, _ = winreg.QueryValueEx(key, watchdog_name)
             if existing == cmd:
                 winreg.CloseKey(key)
                 return
         except FileNotFoundError:
             pass
-        winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, cmd)
+
+        winreg.SetValueEx(key, watchdog_name, 0, winreg.REG_SZ, cmd)
         winreg.CloseKey(key)
-        log.info(f"Registered in Windows startup: {cmd}")
+        log.info(f"Registered watchdog in Windows startup: {cmd}")
     except Exception as exc:
         log.debug(f"Could not register startup: {exc}")
 

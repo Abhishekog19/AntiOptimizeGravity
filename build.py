@@ -2,8 +2,9 @@
 """
 build.py — PyInstaller packaging script for Antigravity Quota Tracker
 
-Produces a single-file executable:
-  Windows: dist/AntigravityQuotaTracker.exe
+Produces two executables:
+  Windows: dist/quota-tracker.exe   (the main tracker — launched by the watchdog)
+           dist/quota-watchdog.exe  (the watchdog — registered in Windows startup)
   macOS:   dist/AntigravityQuotaTracker.app
 
 Usage
@@ -72,16 +73,19 @@ def _build_data_args() -> list:
 
 
 def run_build(onefile: bool = IS_WINDOWS, debug: bool = False) -> None:
-    print(f"Building Antigravity Quota Tracker…")
+    """Build the main tracker executable (quota-tracker.exe)."""
+    print("Building Antigravity Quota Tracker…")
     print(f"  Platform: {sys.platform}")
     print(f"  Bundle:   {'one-file' if onefile else 'one-dir'}")
     print()
 
     _check_pyinstaller()
 
+    exe_name = "quota-tracker" if IS_WINDOWS else "AntigravityQuotaTracker"
+
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--name=AntigravityQuotaTracker",
+        f"--name={exe_name}",
         "--clean",
         "--noconfirm",
     ]
@@ -136,22 +140,15 @@ def run_build(onefile: bool = IS_WINDOWS, debug: bool = False) -> None:
     result = subprocess.run(cmd, cwd=ROOT)
 
     if result.returncode == 0:
-        exe_name = "AntigravityQuotaTracker"
-        if IS_WINDOWS:
-            exe_name += ".exe"
-        exe_path = DIST_DIR / exe_name
+        out_name = exe_name + (".exe" if IS_WINDOWS else "")
+        exe_path = DIST_DIR / out_name
         print()
         print("━" * 50)
-        print(f"✓ Build complete!")
+        print("✓ Tracker build complete!")
         if exe_path.exists():
             size_mb = exe_path.stat().st_size / (1024 * 1024)
             print(f"  Output: {exe_path}")
             print(f"  Size:   {size_mb:.1f} MB")
-        print()
-        print("First-run note:")
-        print("  On Windows, double-click the .exe.")
-        print("  The tray icon will appear in the system tray.")
-        print("  Open http://localhost:4300 in your browser for the dashboard.")
         print("━" * 50)
 
         # Post-process Mac .app to set LSUIElement (hide from Dock + Cmd+Tab)
@@ -159,7 +156,85 @@ def run_build(onefile: bool = IS_WINDOWS, debug: bool = False) -> None:
             _patch_mac_plist()
     else:
         print()
-        print("✗ Build failed (see errors above)")
+        print("✗ Tracker build failed (see errors above)")
+        sys.exit(result.returncode)
+
+
+def build_watchdog(onefile: bool = IS_WINDOWS, debug: bool = False) -> None:
+    """Build the watchdog executable (quota-watchdog.exe).
+
+    The watchdog is a minimal process that:
+      1. Runs silently at Windows startup.
+      2. Polls for Antigravity IDE in the process list every 3 seconds.
+      3. Launches quota-tracker.exe (or main.py from source) when Antigravity opens.
+
+    Both executables must sit in the same directory (dist\\) so the watchdog
+    can locate the tracker via Path(sys.executable).parent / 'quota-tracker.exe'.
+    """
+    if not IS_WINDOWS:
+        print("  [SKIP] Watchdog build is Windows-only.")
+        return
+
+    print()
+    print("Building Antigravity Quota Watchdog…")
+    print(f"  Platform: {sys.platform}")
+    print(f"  Bundle:   {'one-file' if onefile else 'one-dir'}")
+    print()
+
+    _check_pyinstaller()
+
+    cmd = [
+        sys.executable, "-m", "PyInstaller",
+        "--name=quota-watchdog",
+        "--clean",
+        "--noconfirm",
+    ]
+
+    if onefile:
+        cmd.append("--onefile")
+    else:
+        cmd.append("--onedir")
+
+    # Always hide the console — watchdog must be invisible
+    if debug:
+        cmd.append("--console")
+    else:
+        cmd.append("--noconsole")
+
+    if ICON_ICO.exists():
+        cmd.append(f"--icon={ICON_ICO}")
+
+    # psutil is the only non-stdlib dependency
+    cmd.append("--hidden-import=psutil")
+
+    cmd.extend([
+        f"--specpath={SPEC_DIR}",
+        f"--distpath={DIST_DIR}",
+        f"--workpath={BUILD_DIR}",
+    ])
+
+    cmd.append(str(ROOT / "watchdog.py"))
+
+    print("Running:", " ".join(cmd[:6]), "…\n")
+    result = subprocess.run(cmd, cwd=ROOT)
+
+    if result.returncode == 0:
+        exe_path = DIST_DIR / "quota-watchdog.exe"
+        print()
+        print("━" * 50)
+        print("✓ Watchdog build complete!")
+        if exe_path.exists():
+            size_mb = exe_path.stat().st_size / (1024 * 1024)
+            print(f"  Output: {exe_path}")
+            print(f"  Size:   {size_mb:.1f} MB")
+        print()
+        print("Next steps:")
+        print("  1. Run quota-tracker.exe once to register the watchdog in startup.")
+        print("  2. After reboot, open Antigravity — the tracker starts automatically.")
+        print("━" * 50)
+    else:
+        print()
+        print("✗ Watchdog build failed (see errors above)")
         sys.exit(result.returncode)
 
 def _patch_mac_plist() -> None:
@@ -254,3 +329,4 @@ if __name__ == "__main__":
         onefile = False
     debug = "--debug" in sys.argv
     run_build(onefile=onefile, debug=debug)
+    build_watchdog(onefile=onefile, debug=debug)

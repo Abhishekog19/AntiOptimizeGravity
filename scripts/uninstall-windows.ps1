@@ -1,10 +1,11 @@
-# uninstall-windows.ps1 — Antigravity Quota Tracker
+# uninstall-windows.ps1 -- Antigravity Quota Tracker
 #
-# Removes the Quota Tracker from this Windows machine:
-#   1. Kills the running process (if any)
-#   2. Removes from Windows startup registry
-#   3. Removes the compiled .exe from dist\ (if present)
-#   4. Offers to delete the SQLite quota history — requires explicit "yes"
+# Removes the Quota Tracker and Watchdog from this Windows machine:
+#   1. Kills the running tracker process (if any)
+#   2. Kills the running watchdog process (if any)
+#   3. Removes tracker and watchdog from Windows startup registry
+#   4. Removes the compiled .exe files from dist\ (if present)
+#   5. Offers to delete the SQLite quota history -- requires explicit "yes"
 #      (defaulting to NO to prevent accidental data loss)
 #
 # Usage (from project root):
@@ -22,9 +23,9 @@ Write-Host ""
 Write-Host "Antigravity Quota Tracker — Windows Uninstaller" -ForegroundColor Cyan
 Write-Host ""
 
-# ── 1. Kill running process ───────────────────────────────────────────────────
+# -- 1. Kill running tracker process -----------------------------------------
 
-$procName = "AntigravityQuotaTracker"
+$procName = "quota-tracker"
 $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
 
 if ($procs) {
@@ -37,41 +38,68 @@ if ($procs) {
         }
     }
 } else {
-    Write-Host "  [OK] Process not running." -ForegroundColor DarkGray
+    Write-Host "  [OK] Tracker process not running." -ForegroundColor DarkGray
 }
 
-# ── 2. Remove from Windows startup registry ───────────────────────────────────
+# -- 2. Kill running watchdog process -----------------------------------------
 
-$keyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$appName = "AntigravityQuotaTracker"
+$watchdogName = "quota-watchdog"
+$watchdogs = Get-Process -Name $watchdogName -ErrorAction SilentlyContinue
 
-$existing = Get-ItemProperty -Path $keyPath -Name $appName -ErrorAction SilentlyContinue
-if ($existing) {
-    if ($WhatIf) {
-        Write-Host "  [WHATIF] Would remove startup registry entry: $appName" -ForegroundColor Yellow
-    } else {
-        Remove-ItemProperty -Path $keyPath -Name $appName -Force
-        Write-Host "  [REMOVED] Startup registry entry: $appName" -ForegroundColor Green
+if ($watchdogs) {
+    foreach ($p in $watchdogs) {
+        if ($WhatIf) {
+            Write-Host "  [WHATIF] Would stop watchdog: $($p.Name) (PID $($p.Id))" -ForegroundColor Yellow
+        } else {
+            Stop-Process -Id $p.Id -Force
+            Write-Host "  [STOPPED] Watchdog $($p.Name) (PID $($p.Id))" -ForegroundColor Green
+        }
     }
 } else {
-    Write-Host "  [OK] No startup registry entry found." -ForegroundColor DarkGray
+    Write-Host "  [OK] Watchdog process not running." -ForegroundColor DarkGray
 }
 
-# ── 3. Remove compiled .exe ───────────────────────────────────────────────────
+# -- 3. Remove from Windows startup registry ----------------------------------
+
+$keyPath      = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$watchdogKey  = "AntigravityQuotaWatchdog"
+$trackerKey   = "AntigravityQuotaTracker"   # legacy key from older versions
+
+foreach ($regName in @($watchdogKey, $trackerKey)) {
+    $existing = Get-ItemProperty -Path $keyPath -Name $regName -ErrorAction SilentlyContinue
+    if ($existing) {
+        if ($WhatIf) {
+            Write-Host "  [WHATIF] Would remove startup registry entry: $regName" -ForegroundColor Yellow
+        } else {
+            Remove-ItemProperty -Path $keyPath -Name $regName -Force
+            Write-Host "  [REMOVED] Startup registry entry: $regName" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "  [OK] No startup registry entry for: $regName" -ForegroundColor DarkGray
+    }
+}
+
+# -- 4. Remove compiled .exe files -------------------------------------------
 
 # Look relative to this script's location (project root\dist\)
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$exePath   = Join-Path (Split-Path -Parent $scriptDir) "dist\AntigravityQuotaTracker.exe"
+$scriptDir       = Split-Path -Parent $MyInvocation.MyCommand.Path
+$distDir         = Split-Path -Parent $scriptDir | Join-Path -ChildPath "dist"
+$trackerExePath  = Join-Path $distDir "quota-tracker.exe"
+$watchdogExePath = Join-Path $distDir "quota-watchdog.exe"
+# Legacy name from older builds
+$legacyExePath   = Join-Path $distDir "AntigravityQuotaTracker.exe"
 
-if (Test-Path $exePath) {
-    if ($WhatIf) {
-        Write-Host "  [WHATIF] Would delete: $exePath" -ForegroundColor Yellow
+foreach ($exePath in @($trackerExePath, $watchdogExePath, $legacyExePath)) {
+    if (Test-Path $exePath) {
+        if ($WhatIf) {
+            Write-Host "  [WHATIF] Would delete: $exePath" -ForegroundColor Yellow
+        } else {
+            Remove-Item $exePath -Force
+            Write-Host "  [DELETED] $exePath" -ForegroundColor Green
+        }
     } else {
-        Remove-Item $exePath -Force
-        Write-Host "  [DELETED] $exePath" -ForegroundColor Green
+        Write-Host "  [OK] Not found: $exePath" -ForegroundColor DarkGray
     }
-} else {
-    Write-Host "  [OK] No compiled .exe found at: $exePath" -ForegroundColor DarkGray
 }
 
 # ── 4. Offer to delete SQLite quota history ───────────────────────────────────
