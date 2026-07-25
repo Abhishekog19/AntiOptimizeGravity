@@ -15,11 +15,11 @@ Thanks for your interest. This doc covers:
 CDP debug flag (see [README.md](README.md) for setup steps).
 
 ```bash
-git clone https://github.com/yourname/antigravity-quota-tracker
-cd antigravity-quota-tracker
+git clone https://github.com/Abhishekog19/AntiOptimizeGravity
+cd AntiOptimizeGravity
 
 # Install dependencies
-pip install -r notifier/requirements.txt
+pip install -r requirements.txt
 
 # Patch Antigravity shortcut — run once
 # Windows:

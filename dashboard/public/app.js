@@ -70,25 +70,6 @@ TABS.forEach((t) => {
   $(`#tab-${t}`).addEventListener("click", () => showTab(t));
 });
 
-// ── Settings / Tesseract health check ─────────────────────────────────────────
-
-async function checkSettings() {
-  try {
-    const res = await fetch("/api/settings");
-    const data = await res.json();
-    const warn = $("#tesseractWarning");
-    if (!data.tesseract?.available) {
-      $("#tesseractWarningText").textContent =
-        data.tesseract?.warning || "Tesseract not configured — OCR captures will not work.";
-      warn.hidden = false;
-    } else {
-      warn.hidden = true;
-    }
-  } catch {
-    // If settings endpoint fails, don't crash the dashboard
-  }
-}
-
 // ── Overview ──────────────────────────────────────────────────────────────────
 
 async function loadAccounts() {
@@ -654,9 +635,7 @@ async function updateNotifierStatus() {
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
-checkSettings();
 loadAccounts();
 updateNotifierStatus();
 setInterval(loadAccounts,          60_000);
-setInterval(checkSettings,         30_000);
 setInterval(updateNotifierStatus,  STATUS_POLL_INTERVAL);

@@ -1,23 +1,12 @@
-# Antigravity Quota Tracker — Requirements
+# Antigravity Quota Tracker — Notifier Dependencies
 #
-# Install all with:
-#   pip install -r notifier/requirements.txt
-
-# ── CDP watcher (performance + reliability) ────────────────────────────────────
-requests>=2.28.0       # faster HTTP; falls back to urllib if absent
-psutil>=5.9.0          # enables launch / close triggers; gracefully absent otherwise
-
-# ── Embedded dashboard server (replaces Node.js/Express) ──────────────────────
-flask>=3.0.0           # dashboard HTTP server (runs in daemon thread)
-
-# ── System tray icon ────────────────────────────────────────────────────────────
-pystray>=0.19.5        # cross-platform system tray icon
-pillow>=10.0.0         # icon rendering + OCR image pre-processing
-
-# ── Native dashboard window ────────────────────────────────────────────────────
-pywebview>=4.4.0       # native window backed by WebView2 (Win) / WKWebView (Mac)
-                       # No extra browser install needed on Win 10/11 or macOS.
-
-# ── Notifications ──────────────────────────────────────────────────────────────
-win10toast>=0.9        # Windows toast notifications (Windows-only)
-# plyer>=2.1.0         # cross-platform alternative (uncomment for Mac/Linux)
+# The full dependency list has moved to the root requirements.txt.
+# Install from the project root with:
+#
+#   pip install -r requirements.txt
+#
+# This file is kept for tools that auto-discover requirements.txt in subdirectories.
+# It simply redirects to the root file.
+#
+# (Note: pip does not support -r relative-file redirects between directories,
+#  so just run the root requirements.txt directly from the project root.)

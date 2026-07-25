@@ -1,10 +1,6 @@
 """
 server/flask_app.py — Flask dashboard server for Antigravity Quota Tracker
 
-Ports all Express routes from dashboard/server.js to Flask.
-Same URL paths, same JSON response shapes — the frontend (HTML/CSS/JS) is
-unchanged and doesn't know it's talking to Flask instead of Express.
-
 Routes
 ──────
   GET  /                         → serve index.html
@@ -12,11 +8,9 @@ Routes
   GET  /api/accounts/<id>/history
   PATCH /api/accounts/<id>       → rename account
   GET  /api/analytics?range=week|month|year|max
-  GET  /api/settings             → tesseract health + config
   GET  /api/status               → notifier heartbeat status
   POST /api/heartbeat            → notifier posts here every 15 s
   POST /api/readings             → store a new quota reading
-  POST /api/ocr                  → image → parsed quota numbers
 
 Static files are served from dashboard/public/.
 """
@@ -30,7 +24,6 @@ from flask import (
     Flask, request, jsonify, send_from_directory, send_file
 )
 from server import db
-from server.ocr import tesseract_available, ocr_image
 
 log = logging.getLogger(__name__)
 
@@ -39,9 +32,6 @@ _HERE       = Path(__file__).parent.parent          # project root
 _PUBLIC_DIR = _HERE / "dashboard" / "public"        # static files (unchanged)
 
 # ── Config (from environment / .env loaded by main.py) ────────────────────────
-TESSERACT_PATH = os.environ.get("TESSERACT_PATH", "tesseract")
-OCR_PSM        = int(os.environ.get("OCR_PSM", "3"))
-OCR_UPSCALE    = int(os.environ.get("OCR_UPSCALE", "2"))
 API_KEY        = os.environ.get("DASHBOARD_API_KEY", "")
 PORT           = int(os.environ.get("PORT", "4300"))
 
@@ -203,73 +193,8 @@ def create_app() -> Flask:
             log.error(f"[analytics] {exc}")
             return jsonify({"error": "analytics query failed", "detail": str(exc)}), 500
 
-    # ── GET /api/settings ─────────────────────────────────────────────────────
-
-    @app.route("/api/settings")
-    def get_settings():
-        t_avail = tesseract_available(TESSERACT_PATH)
-        return jsonify({
-            "tesseract": {
-                "path":      TESSERACT_PATH,
-                "available": t_avail,
-                "warning":   (
-                    None if t_avail else
-                    f'Tesseract not found at "{TESSERACT_PATH}". OCR captures will not work. '
-                    "Copy notifier/config.example.env to notifier/.env and set TESSERACT_PATH."
-                ),
-            },
-            "ocrPsm":          OCR_PSM,
-            "ocrUpscale":      OCR_UPSCALE,
-            "apiKeyConfigured": bool(API_KEY),
-        })
-
-    # ── POST /api/ocr ─────────────────────────────────────────────────────────
-
-    @app.route("/api/ocr", methods=["POST"])
-    def post_ocr():
-        if "image" not in request.files:
-            return jsonify({
-                "error": "No image uploaded. Send a multipart/form-data request with field 'image'."
-            }), 400
-
-        if not tesseract_available(TESSERACT_PATH):
-            return jsonify({
-                "error":  "Tesseract not found",
-                "detail": f'Could not locate Tesseract at "{TESSERACT_PATH}". '
-                          "Set TESSERACT_PATH in your .env file.",
-            }), 503
-
-        file = request.files["image"]
-        image_bytes = file.read()
-        mime_type   = file.mimetype or "image/png"
-
-        try:
-            result = ocr_image(image_bytes, mime_type, TESSERACT_PATH, OCR_PSM, OCR_UPSCALE)
-        except Exception as exc:
-            log.error(f"[OCR] {exc}")
-            return jsonify({"error": "OCR processing failed", "detail": str(exc)}), 500
-
-        if not result["quota"]:
-            return jsonify({
-                "error":      "Could not parse quota numbers from this image.",
-                "rawText":    result["text"],
-                "confidence": "low",
-            }), 422
-
-        quota = result["quota"]
-        cg    = quota.get("claudeGpt") or {}
-        suspicious_zero = cg.get("weeklyPct") == 0 and cg.get("weeklyResetRaw")
-        confidence = (
-            "high"
-            if (cg.get("weeklyPct") is not None and
-                cg.get("fiveHourPct") is not None and
-                not suspicious_zero)
-            else "low"
-        )
-
-        return jsonify({**quota, "confidence": confidence, "rawText": result["text"]})
-
     return app
+
 
 
 def run_flask(host: str = "0.0.0.0", port: int = PORT, debug: bool = False) -> None:
