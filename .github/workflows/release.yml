@@ -1,0 +1,121 @@
+name: Build & Release Installer
+
+# Triggers on version tags: git tag v1.0.0 && git push --tags
+on:
+  push:
+    tags:
+      - "v*"
+  # Allow manual trigger from the Actions tab for testing
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.0)"
+        required: true
+        default: "v0.0.0-test"
+
+permissions:
+  contents: write   # needed to create GitHub Releases
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest   # Must be Windows for PyInstaller + Inno Setup
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so tags resolve correctly
+
+      # ── 2. Set up Python ─────────────────────────────────────────────────────
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: "notifier/requirements.txt"
+
+      # ── 3. Install Python dependencies ───────────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r notifier/requirements.txt
+          pip install pyinstaller
+
+      # ── 4. Build quota-tracker.exe + quota-watchdog.exe ──────────────────────
+      - name: Build executables with PyInstaller
+        run: python build.py
+        # build.py also generates assets/icon.ico if missing (via Pillow)
+
+      # ── 5. Verify both exes were produced ────────────────────────────────────
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $tracker  = "dist\quota-tracker.exe"
+          $watchdog = "dist\quota-watchdog.exe"
+          if (-not (Test-Path $tracker))  { Write-Error "MISSING: $tracker";  exit 1 }
+          if (-not (Test-Path $watchdog)) { Write-Error "MISSING: $watchdog"; exit 1 }
+          $tMB = [math]::Round((Get-Item $tracker).Length  / 1MB, 1)
+          $wMB = [math]::Round((Get-Item $watchdog).Length / 1MB, 1)
+          Write-Host "quota-tracker.exe:  $tMB MB"
+          Write-Host "quota-watchdog.exe: $wMB MB"
+
+      # ── 6. Install Inno Setup 6 via Chocolatey ───────────────────────────────
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          # Refresh PATH so ISCC.exe is available
+          $env:PATH += ";C:\Program Files (x86)\Inno Setup 6"
+          ISCC.exe /? 2>&1 | Select-Object -First 2
+
+      # ── 7. Compile the Inno Setup installer ──────────────────────────────────
+      - name: Compile installer (ISCC)
+        shell: pwsh
+        run: |
+          $ISCC = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          $iss  = "installer\setup.iss"
+          & $ISCC $iss
+          if ($LASTEXITCODE -ne 0) { Write-Error "ISCC failed with exit code $LASTEXITCODE"; exit 1 }
+          $setup = "installer\AntigravityQuotaTrackerSetup.exe"
+          if (-not (Test-Path $setup)) { Write-Error "Setup exe not found at $setup"; exit 1 }
+          $mb = [math]::Round((Get-Item $setup).Length / 1MB, 1)
+          Write-Host "AntigravityQuotaTrackerSetup.exe: $mb MB"
+
+      # ── 8. Determine release tag ──────────────────────────────────────────────
+      - name: Set release tag
+        id: tag
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.tag }}"
+          } else {
+            $tag = $env:GITHUB_REF_NAME
+          }
+          echo "TAG=$tag" >> $env:GITHUB_OUTPUT
+          Write-Host "Release tag: $tag"
+
+      # ── 9. Create GitHub Release and upload the installer ────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.TAG }}
+          name: "Antigravity Quota Tracker ${{ steps.tag.outputs.TAG }}"
+          body: |
+            ## Install
+
+            1. Download **AntigravityQuotaTrackerSetup.exe** below
+            2. Run it, click through the 3 screens
+            3. Open Antigravity IDE — the tracker starts automatically
+
+            Look for a coloured dot in your system tray (`^` button near the clock).
+
+            ---
+
+            **System requirements:** Windows 10/11 64-bit. No Python or Node.js required.
+            Antigravity IDE must be installed before running this setup.
+          draft: false
+          prerelease: ${{ startsWith(steps.tag.outputs.TAG, 'v0') }}
+          files: |
+            installer/AntigravityQuotaTrackerSetup.exe
+          fail_on_unmatched_files: true

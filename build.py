@@ -1,85 +1,129 @@
 #!/usr/bin/env python3
 """
-build.py — PyInstaller packaging script for Antigravity Quota Tracker
+build.py - PyInstaller packaging script for Antigravity Quota Tracker
 
-Produces two executables:
-  Windows: dist/quota-tracker.exe   (the main tracker — launched by the watchdog)
-           dist/quota-watchdog.exe  (the watchdog — registered in Windows startup)
-  macOS:   dist/AntigravityQuotaTracker.app
+Produces two executables (Windows):
+  dist/quota-tracker.exe   - the main tracker (tray icon, Flask, CDP watcher)
+  dist/quota-watchdog.exe  - the watchdog (registered in Windows startup)
 
 Usage
-─────
-  pip install pyinstaller
-  python build.py
+-----
+  python build.py             # build both (default)
+  python build.py --debug     # include console window for debugging
+  python build.py --onedir    # directory bundle instead of single-file
 
-Optional flags
-──────────────
-  --onefile     Force single-file bundle (default on Windows)
-  --onedir      Directory bundle instead (faster startup, default on macOS)
-  --debug       Include console window and verbose output
+PyInstaller is auto-installed if missing.
+assets/icon.ico is auto-generated via Pillow if missing.
 """
-
 from __future__ import annotations
+
+import io
 import os
 import sys
 import subprocess
 import shutil
-import plistlib
 from pathlib import Path
+
+# Force UTF-8 output on Windows to avoid cp1252 UnicodeEncodeError
+if sys.platform == "win32" and sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT      = Path(__file__).parent
 DIST_DIR  = ROOT / "dist"
 BUILD_DIR = ROOT / "build"
-SPEC_DIR  = ROOT
+ASSETS    = ROOT / "assets"
+ICON_ICO  = ASSETS / "icon.ico"
 
 IS_WINDOWS = sys.platform == "win32"
 IS_MAC     = sys.platform == "darwin"
 
-# ── Asset paths ───────────────────────────────────────────────────────────────
-ICON_ICO  = ROOT / "assets" / "icon.ico"    # Windows
-ICON_ICNS = ROOT / "assets" / "icon.icns"   # macOS
-
-# ── Data files to bundle (source, dest-dir-in-bundle) ────────────────────────
+# ── Data files bundled with the tracker ───────────────────────────────────────
 DATA_FILES = [
-    (ROOT / "dashboard" / "public",           "dashboard/public"),
+    (ROOT / "dashboard" / "public", "dashboard/public"),
     (ROOT / "notifier" / "config.example.env", "notifier"),
 ]
-
-# Optionally include the user's .env if present (pre-configured builds)
 _ENV_FILE = ROOT / "notifier" / ".env"
 if _ENV_FILE.exists():
     DATA_FILES.append((_ENV_FILE, "notifier"))
 
 
-def _check_pyinstaller() -> None:
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _ensure_pyinstaller() -> None:
+    """Install PyInstaller if not present."""
     try:
         import PyInstaller  # noqa: F401
     except ImportError:
-        print("PyInstaller not found. Install it with:")
-        print("  pip install pyinstaller")
-        sys.exit(1)
+        print("PyInstaller not found — installing...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
+        print()
 
 
-def _build_data_args() -> list:
+def _ensure_icon() -> None:
+    """Generate assets/icon.ico via Pillow if it doesn't exist."""
+    if ICON_ICO.exists():
+        return
+    ASSETS.mkdir(exist_ok=True)
+    try:
+        from PIL import Image, ImageDraw
+        sizes = [256, 128, 64, 48, 32, 16]
+        frames = []
+        for s in sizes:
+            img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            pad = max(1, s // 16)
+            # Red dot with white border — matches the tray icon colour
+            d.ellipse(
+                [pad, pad, s - pad, s - pad],
+                fill=(220, 50, 50, 255),
+                outline=(255, 255, 255, 255),
+                width=max(1, s // 32),
+            )
+            frames.append(img)
+        frames[0].save(
+            ICON_ICO,
+            format="ICO",
+            sizes=[(s, s) for s in sizes],
+            append_images=frames[1:],
+        )
+        print(f"  Generated icon: {ICON_ICO}")
+    except ImportError:
+        print("  [WARN] Pillow not available — skipping icon generation")
+
+
+def _data_args() -> list:
     sep = ";" if IS_WINDOWS else ":"
     args = []
     for src, dst in DATA_FILES:
-        src_path = Path(src)
-        if src_path.exists():
-            args.append(f"--add-data={src_path}{sep}{dst}")
+        src = Path(src)
+        if src.exists():
+            args.append(f"--add-data={src}{sep}{dst}")
         else:
-            print(f"  [WARN] Data path not found, skipping: {src_path}")
+            print(f"  [WARN] Data path not found, skipping: {src}")
     return args
 
 
-def run_build(onefile: bool = IS_WINDOWS, debug: bool = False) -> None:
-    """Build the main tracker executable (quota-tracker.exe)."""
-    print("Building Antigravity Quota Tracker…")
-    print(f"  Platform: {sys.platform}")
-    print(f"  Bundle:   {'one-file' if onefile else 'one-dir'}")
-    print()
+def _run_pyinstaller(cmd: list) -> None:
+    print("Running PyInstaller…")
+    result = subprocess.run(cmd, cwd=ROOT)
+    if result.returncode != 0:
+        print("\n✗ PyInstaller failed (see errors above)")
+        sys.exit(result.returncode)
 
-    _check_pyinstaller()
+
+# ── Tracker build ─────────────────────────────────────────────────────────────
+
+def build_tracker(onefile: bool = True, debug: bool = False) -> Path:
+    """
+    Build quota-tracker.exe — the main tracker process.
+
+    Returns the path to the output exe.
+    """
+    print("=" * 60)
+    print("Building quota-tracker (main tracker)…")
+    print(f"  Bundle: {'one-file' if onefile else 'one-dir'}")
+    print()
 
     exe_name = "quota-tracker" if IS_WINDOWS else "AntigravityQuotaTracker"
 
@@ -88,245 +132,130 @@ def run_build(onefile: bool = IS_WINDOWS, debug: bool = False) -> None:
         f"--name={exe_name}",
         "--clean",
         "--noconfirm",
+        "--onefile" if onefile else "--onedir",
+        "--windowed" if IS_MAC else "--noconsole",
+        f"--specpath={ROOT}",
+        f"--distpath={DIST_DIR}",
+        f"--workpath={BUILD_DIR}",
     ]
 
-    # Single file vs directory
-    if onefile:
-        cmd.append("--onefile")
-    else:
-        cmd.append("--onedir")
-
-    # Console window
     if debug:
+        # Override: show console for debugging
+        cmd = [c for c in cmd if c not in ("--windowed", "--noconsole")]
         cmd.append("--console")
-    else:
-        cmd.append("--windowed" if IS_MAC else "--noconsole")
 
-    # Icon
-    if IS_WINDOWS and ICON_ICO.exists():
+    if ICON_ICO.exists():
         cmd.append(f"--icon={ICON_ICO}")
-    elif IS_MAC and ICON_ICNS.exists():
-        cmd.append(f"--icon={ICON_ICNS}")
 
-    # Hidden imports that PyInstaller often misses
+    # Hidden imports PyInstaller commonly misses
     hidden = [
         "pystray._win32",
         "pystray._darwin",
         "pystray._gtk",
         "PIL._tkinter_finder",
+        "PIL.Image",
         "flask",
         "flask.json",
         "werkzeug",
+        "werkzeug.serving",
         "sqlite3",
         "win10toast",
+        "pkg_resources",
     ]
     for h in hidden:
         cmd.append(f"--hidden-import={h}")
 
-    # Data files
-    cmd.extend(_build_data_args())
+    # Collect full packages (data files + submodules) for tricky packages
+    for pkg in ("pystray", "PIL", "flask", "werkzeug"):
+        cmd.append(f"--collect-all={pkg}")
 
-    # Spec and build directories
-    cmd.extend([
-        f"--specpath={SPEC_DIR}",
-        f"--distpath={DIST_DIR}",
-        f"--workpath={BUILD_DIR}",
-    ])
-
-    # Entry point
+    cmd.extend(_data_args())
     cmd.append(str(ROOT / "main.py"))
 
-    print("Running:", " ".join(cmd[:6]), "…\n")
-    result = subprocess.run(cmd, cwd=ROOT)
+    _run_pyinstaller(cmd)
 
-    if result.returncode == 0:
-        out_name = exe_name + (".exe" if IS_WINDOWS else "")
-        exe_path = DIST_DIR / out_name
+    suffix = ".exe" if IS_WINDOWS else ""
+    out = DIST_DIR / (exe_name + suffix)
+    if out.exists():
+        mb = out.stat().st_size / 1_048_576
         print()
-        print("━" * 50)
-        print("✓ Tracker build complete!")
-        if exe_path.exists():
-            size_mb = exe_path.stat().st_size / (1024 * 1024)
-            print(f"  Output: {exe_path}")
-            print(f"  Size:   {size_mb:.1f} MB")
-        print("━" * 50)
-
-        # Post-process Mac .app to set LSUIElement (hide from Dock + Cmd+Tab)
-        if IS_MAC:
-            _patch_mac_plist()
-    else:
-        print()
-        print("✗ Tracker build failed (see errors above)")
-        sys.exit(result.returncode)
+        print("-" * 60)
+        print("[OK] quota-tracker build complete!")
+        print(f"  Output : {out}")
+        print(f"  Size   : {mb:.1f} MB")
+        print("-" * 60)
+    return out
 
 
-def build_watchdog(onefile: bool = IS_WINDOWS, debug: bool = False) -> None:
-    """Build the watchdog executable (quota-watchdog.exe).
+# ── Watchdog build ────────────────────────────────────────────────────────────
 
-    The watchdog is a minimal process that:
-      1. Runs silently at Windows startup.
-      2. Polls for Antigravity IDE in the process list every 3 seconds.
-      3. Launches quota-tracker.exe (or main.py from source) when Antigravity opens.
+def build_watchdog(onefile: bool = True, debug: bool = False) -> Path | None:
+    """
+    Build quota-watchdog.exe — the minimal startup process.
 
-    Both executables must sit in the same directory (dist\\) so the watchdog
-    can locate the tracker via Path(sys.executable).parent / 'quota-tracker.exe'.
+    Must sit in the same directory as quota-tracker.exe so it can locate it
+    via Path(sys.executable).parent / 'quota-tracker.exe'.
     """
     if not IS_WINDOWS:
-        print("  [SKIP] Watchdog build is Windows-only.")
-        return
+        print("  [SKIP] Watchdog is Windows-only.")
+        return None
 
     print()
-    print("Building Antigravity Quota Watchdog…")
-    print(f"  Platform: {sys.platform}")
-    print(f"  Bundle:   {'one-file' if onefile else 'one-dir'}")
+    print("=" * 60)
+    print("Building quota-watchdog (startup watchdog)…")
+    print(f"  Bundle: {'one-file' if onefile else 'one-dir'}")
     print()
-
-    _check_pyinstaller()
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--name=quota-watchdog",
         "--clean",
         "--noconfirm",
+        "--onefile" if onefile else "--onedir",
+        "--noconsole",   # watchdog is always invisible
+        f"--specpath={ROOT}",
+        f"--distpath={DIST_DIR}",
+        f"--workpath={BUILD_DIR}",
     ]
 
-    if onefile:
-        cmd.append("--onefile")
-    else:
-        cmd.append("--onedir")
-
-    # Always hide the console — watchdog must be invisible
     if debug:
+        cmd = [c for c in cmd if c != "--noconsole"]
         cmd.append("--console")
-    else:
-        cmd.append("--noconsole")
 
     if ICON_ICO.exists():
         cmd.append(f"--icon={ICON_ICO}")
 
-    # psutil is the only non-stdlib dependency
     cmd.append("--hidden-import=psutil")
-
-    cmd.extend([
-        f"--specpath={SPEC_DIR}",
-        f"--distpath={DIST_DIR}",
-        f"--workpath={BUILD_DIR}",
-    ])
-
+    cmd.append("--collect-all=psutil")
     cmd.append(str(ROOT / "watchdog.py"))
 
-    print("Running:", " ".join(cmd[:6]), "…\n")
-    result = subprocess.run(cmd, cwd=ROOT)
+    _run_pyinstaller(cmd)
 
-    if result.returncode == 0:
-        exe_path = DIST_DIR / "quota-watchdog.exe"
+    out = DIST_DIR / "quota-watchdog.exe"
+    if out.exists():
+        mb = out.stat().st_size / 1_048_576
         print()
-        print("━" * 50)
-        print("✓ Watchdog build complete!")
-        if exe_path.exists():
-            size_mb = exe_path.stat().st_size / (1024 * 1024)
-            print(f"  Output: {exe_path}")
-            print(f"  Size:   {size_mb:.1f} MB")
+        print("-" * 60)
+        print("[OK] quota-watchdog build complete!")
+        print(f"  Output : {out}")
+        print(f"  Size   : {mb:.1f} MB")
         print()
         print("Next steps:")
-        print("  1. Run quota-tracker.exe once to register the watchdog in startup.")
-        print("  2. After reboot, open Antigravity — the tracker starts automatically.")
-        print("━" * 50)
-    else:
-        print()
-        print("✗ Watchdog build failed (see errors above)")
-        sys.exit(result.returncode)
-
-def _patch_mac_plist() -> None:
-    """
-    Post-process the macOS .app bundle's Info.plist to set LSUIElement = True.
-
-    LSUIElement = True is required for a menu-bar-only app:
-      - Hides the app from the Dock
-      - Hides the app from the Cmd+Tab application switcher
-      - App still appears in the Mac menu bar (NSStatusBar) via pystray
-
-    Must be called AFTER a successful `python build.py` on macOS.
-    Uses stdlib plistlib — no external dependencies.
-    """
-    app_bundle = DIST_DIR / "AntigravityQuotaTracker.app"
-    plist_path = app_bundle / "Contents" / "Info.plist"
-
-    if not plist_path.exists():
-        print(f"  [WARN] Info.plist not found at {plist_path} — LSUIElement not set")
-        print("         (Expected for --onedir Mac build; check DIST_DIR)")
-        return
-
-    try:
-        with open(plist_path, "rb") as f:
-            plist = plistlib.load(f)
-
-        if plist.get("LSUIElement") is True:
-            print("  [INFO] LSUIElement already set to True in Info.plist")
-            return
-
-        plist["LSUIElement"] = True
-
-        with open(plist_path, "wb") as f:
-            plistlib.dump(plist, f)
-
-        print("✓ Patched Info.plist: LSUIElement = True (app will not appear in Dock)")
-    except Exception as exc:
-        print(f"  [ERROR] Could not patch Info.plist: {exc}")
-        print("  The app will still work, but will appear in the Dock.")
-        print("  To fix manually: add <key>LSUIElement</key><true/> to:")
-        print(f"  {plist_path}")
+        print("  1. Run the Inno Setup compiler:")
+        print("     ISCC.exe installer\\setup.iss")
+        print("  2. Distribute installer\\AntigravityQuotaTrackerSetup.exe")
+        print("-" * 60)
+    return out
 
 
-    """
-    Called automatically when the packaged .exe runs for the first time.
-    Detects Antigravity and patches its shortcut.
-    Embedded in main.py in the distributed build, but kept here for reference.
-    """
-    import winreg
-    import glob
-
-    # Standard Antigravity install locations
-    candidates = [
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Antigravity IDE" / "Antigravity IDE.exe",
-        Path(os.environ.get("PROGRAMFILES", "")) / "Antigravity IDE" / "Antigravity IDE.exe",
-        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Antigravity IDE" / "Antigravity IDE.exe",
-    ]
-
-    ag_exe = next((str(p) for p in candidates if p.exists()), None)
-    if not ag_exe:
-        return
-
-    flag = "--remote-debugging-port=9222"
-
-    # Check if already patched
-    try:
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\App Paths\Antigravity IDE.exe",
-        )
-        val, _ = winreg.QueryValueEx(key, "")
-        if flag in val:
-            return
-    except Exception:
-        pass
-
-    # Patch via startup shortcut (simplest approach — doesn't modify registry)
-    startup = (
-        Path(os.environ.get("APPDATA", ""))
-        / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
-        / "AntigravityQuotaTracker.bat"
-    )
-    startup.write_text(
-        f'@echo off\nstart "" "{ag_exe}" {flag}\n',
-        encoding="utf-8",
-    )
-
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    onefile = "--onefile" in sys.argv or IS_WINDOWS
-    if "--onedir" in sys.argv:
-        onefile = False
-    debug = "--debug" in sys.argv
-    run_build(onefile=onefile, debug=debug)
+    onefile = "--onedir" not in sys.argv   # default: one-file on all platforms
+    debug   = "--debug" in sys.argv
+
+    _ensure_pyinstaller()
+    _ensure_icon()
+
+    build_tracker(onefile=onefile, debug=debug)
     build_watchdog(onefile=onefile, debug=debug)

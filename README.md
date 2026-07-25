@@ -5,6 +5,22 @@
 
 ---
 
+## Install — Windows
+
+> **Requirements:** Windows 10/11 64-bit. Antigravity IDE must be installed first.
+> No Python, Node.js, or terminal ever required.
+
+1. **[Download AntigravityQuotaTrackerSetup.exe](https://github.com/Abhishekog19/AntiOptimizeGravity/releases/latest)** from the Releases page
+2. Run it, click **Next** a few times
+3. Open Antigravity IDE — the tracker starts automatically within a few seconds
+
+Look for a **coloured dot** in your system tray (`^` button near the clock).  
+Right-click it to open the dashboard or trigger a manual capture.
+
+**Time from download to working tray icon: under 2 minutes on a clean machine.**
+
+---
+
 ## What problem this solves
 
 Antigravity IDE shows your remaining AI quota (weekly and 5-hour limits) in
@@ -18,60 +34,15 @@ in a system tray icon. All data stays on your machine.
 
 ---
 
-## Install — Windows
-
-### Option A: Single executable (no Python required)
-
-1. Download `AntigravityQuotaTracker.exe` from the [Releases page](https://github.com/yourname/antigravity-quota-tracker/releases)
-2. Double-click — a tray icon appears in the system tray immediately
-3. Run the setup script once to patch the Antigravity shortcut:
-   ```
-   powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1
-   ```
-4. Launch Antigravity via the patched shortcut — the tracker connects automatically
-
-**Time from download to working tray icon:** under 30 seconds on a clean machine.
-
-### Option B: Run from source
-
-**Prerequisites:** Python 3.8+
-
-```bash
-git clone https://github.com/yourname/antigravity-quota-tracker
-cd antigravity-quota-tracker
-pip install -r notifier/requirements.txt
-powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1
-python main.py
-```
-
-Dashboard at **http://localhost:4300**. Right-click the tray icon for the menu.
-
----
-
-## How to start
-
-1. **Run `python main.py` once** after setup (or after a reboot) — this registers
-   the watchdog (`watchdog.py`) in Windows startup and then starts the tracker.
-2. **After that: just open Antigravity as normal** — the watchdog sees it appear
-   in the process list and launches the tracker automatically within 5 seconds.
-3. **No terminal, no manual commands ever again.** The tray icon is the only
-   visible output. The watchdog uses ~2 MB RAM and zero CPU when idle.
-
-> **What runs at startup:** only the tiny watchdog process. The tracker itself
-> does not start until Antigravity opens. Close Antigravity, reopen it — the
-> tracker launches again automatically.
-
----
-
-## Install — Mac
+## Install — macOS
 
 > **Current Mac support status:** The setup script and core CDP watcher code
 > are written for Mac, but have not been tested on a real Mac machine yet.
-> Treat Mac support as **experimental**. See [Known Limitations](#known-limitations).
+> Treat Mac support as **experimental**.
 
 ```bash
-git clone https://github.com/yourname/antigravity-quota-tracker
-cd antigravity-quota-tracker
+git clone https://github.com/Abhishekog19/AntiOptimizeGravity
+cd AntiOptimizeGravity
 pip install -r notifier/requirements.txt
 bash scripts/setup-mac.sh
 ```
@@ -96,7 +67,7 @@ Antigravity IDE is an Electron app, so its UI is a web page accessible via
 Chrome DevTools Protocol (CDP). This tracker:
 
 1. **Starts Antigravity with** `--remote-debugging-port=9222` (via the patched
-   shortcut) — this exposes a local HTTP endpoint for CDP.
+   shortcut — done automatically by the installer) — this exposes a local HTTP endpoint for CDP.
 2. **Maintains a persistent CDP connection** to the main workbench window with
    the Network domain enabled. No DOM polling — the tracker listens passively
    for `Network.requestWillBeSent` events.
@@ -108,14 +79,12 @@ Chrome DevTools Protocol (CDP). This tracker:
 
 **Why CDP instead of OCR or screen scraping?**
 CDP gives us direct access to the actual DOM text — deterministic, fast, and
-doesn't break when the UI is offscreen or minimized. OCR requires Tesseract
-and fails on high-DPI screens. Screenshot scraping breaks on theme changes.
+doesn't break when the UI is offscreen or minimized.
 
 **Why GetTurnDiff?**
 Every completed agent response in Antigravity IDE triggers exactly two rapid
-`GetTurnDiff` network requests to the backend. Listening for this event is more
-accurate than UI-event approximations (profile menu, sign-out dialog) because
-it fires at the exact moment quota is consumed — no polling, no DOM text scans.
+`GetTurnDiff` network requests to the backend. Listening for this event fires
+at the exact moment quota is consumed — no polling, no DOM text scans.
 
 ---
 
@@ -125,11 +94,6 @@ it fires at the exact moment quota is consumed — no polling, no DOM text scans
 |---|---------|------|---------|
 | 1 | **launch** | Antigravity process appears | Navigate to Settings › Models, Refresh, read |
 | 2 | **GetTurnDiff** | Agent response completes | Navigate to Settings › Models, Refresh, read |
-
-The GetTurnDiff trigger fires via a persistent CDP Network domain listener on the
-main workbench window. Antigravity emits exactly two rapid GetTurnDiff network
-requests per completed agent response; a 500 ms debounce collapses them into one
-capture event — so the dashboard receives exactly one reading per response.
 
 A **manual capture** is always available via right-click → Capture Now in the tray menu.
 
@@ -143,7 +107,7 @@ A **manual capture** is always available via right-click → Capture Now in the 
 | 🟡 Amber | At least one account ≤ 30% weekly |
 | 🔴 Red | All accounts ≤ 10% weekly (or no data yet) |
 
-**Left-click** → opens the dashboard in a native window  
+**Left-click** → opens the dashboard  
 **Right-click** → menu: Open Dashboard | Capture Now | Run Diagnostics | Quit
 
 ---
@@ -157,13 +121,6 @@ A **manual capture** is always available via right-click → Capture Now in the 
 3. Access the dashboard from your phone at `http://<your-pc-tailscale-ip>:4300`
 
 No port-forwarding, no dynamic DNS, no deployment required.
-
-### VPS self-hosting (advanced)
-
-1. Run `python main.py` on a Linux VPS
-2. Set `DASHBOARD_API_KEY=<a-strong-secret>` in `notifier/.env`
-3. Reverse-proxy port 4300 via nginx/Caddy with HTTPS
-4. Set the same key in your browser (the dashboard reads it from localStorage)
 
 ---
 
@@ -190,152 +147,108 @@ Antigravity only fetches quota from its servers when the Settings › Models
 panel is rendered. This tracker reads that data — it cannot retroactively
 recover quota data for time periods when Settings › Models was never displayed.
 
-For the GetTurnDiff trigger to produce accurate data, open Settings › Models
-at least once per session before sending messages to the agent.
-
 ### Mac support is experimental
 
-The code is written to run on Mac, but as of this release it has only been
-tested on Windows. Specifically unverified on Mac:
-
-- Tray icon appearing in the menu bar (not the Dock) — code is correct per
-  pystray docs but untested on real hardware
-- CDP launch flag — the `antigravity-debug` shell wrapper is created by
-  `setup-mac.sh` but its actual CDP connectivity has not been confirmed
-- Process name detection — `psutil` may see a different process name on Mac
-
-If you run this on Mac, please report your results by opening a GitHub issue.
-If something doesn't work, use **Run Diagnostics** from the tray menu (once
-you get that far) and include the report in your issue.
+The code is written to run on Mac, but has only been tested on Windows.
 
 ### Breaks if Antigravity changes its Settings UI text
 
-Every string the parser looks for (`"Weekly Limit"`, `"Five Hour Limit"`,
-`"Claude and GPT models"`, etc.) is hardcoded against the version of
-Antigravity this was built against. A future Antigravity update could rename
-or restructure these and silently break capture.
+Every string the parser looks for is hardcoded against the current Antigravity
+version. A future update could rename or restructure these and silently break capture.
 
-**What to do when this happens:** right-click the tray icon → **Run Diagnostics**.
-The report shows exactly which strings are `FOUND` vs `MISSING` in the current
-Antigravity UI. Paste the report into a GitHub issue — that's everything needed
-to update the parser.
-
-### psutil required for launch and close detection
-
-Without `psutil`, the process-detection triggers (launch and close notification)
-are silently disabled. The GetTurnDiff network listener still sets up correctly
-if Antigravity is already running, but there will be no automatic capture on
-launch and no "closed" toast.
-
-```bash
-pip install psutil
-```
+**What to do:** right-click the tray icon → **Run Diagnostics**. Paste the report into a GitHub issue.
 
 ---
 
 ## Troubleshooting
 
 **Tray icon shows red / "no data" even after Antigravity is open**
-- Check that Antigravity was launched via the debug shortcut (not a normal shortcut).
 - Right-click tray → Run Diagnostics — the report shows whether CDP is reachable.
-- If the report says "not_open": the debug flag isn't being applied. Re-run `setup-windows.ps1`.
-- If the report says "conflict": another process is using port 9222. Change `CDP_PORT` in `notifier/.env`.
+- If the report says "not_open": the debug flag isn't being applied. Re-run the installer.
 
 **"Capture failed: could not open Settings › Models"**
-- Antigravity must be running with the CDP flag AND have Settings → Models open
-  at least once per session before a capture can succeed.
-- Open Settings → Models manually, then click "Capture Now" from the tray menu.
+- Open Settings → Models manually once per session, then click "Capture Now".
 
-**Dashboard at http://localhost:4300 shows no data**
-- The Flask server starts with the tray icon. If you see no data, check the
-  terminal output (or log file) for errors.
-- `notifier/.env` must have `DASHBOARD_URL=http://localhost:4300` (default).
-
-**Port 9222 conflict warning in the log**
-- Another application is bound to port 9222. Options:
-  1. Stop the conflicting service.
-  2. Change `CDP_PORT` in `notifier/.env` to another port (e.g. `9223`) and
-     re-run `setup-windows.ps1 -Port 9223` to update the shortcut.
+**Port 9222 conflict**
+- Change `CDP_PORT` in `notifier/.env` and reinstall to update the shortcut.
 
 ---
 
 ## Uninstalling
 
-```bash
-# Windows
-powershell -ExecutionPolicy Bypass -File scripts\uninstall-windows.ps1
-
-# Mac
-bash scripts/uninstall-mac.sh
-```
-
-Both scripts stop the process, remove the startup entry, and optionally delete
-the SQLite history. **Deleting history requires typing "yes" explicitly** —
-pressing Enter keeps your data.
-
----
-
-## Building the executable
-
-```bash
-pip install pyinstaller
-python build.py
-# Windows output:
-#   dist/quota-tracker.exe    (the main tracker)
-#   dist/quota-watchdog.exe   (the watchdog — registered in Windows startup)
-# macOS output:
-#   dist/AntigravityQuotaTracker.app   (with LSUIElement patched)
-```
-
-Both Windows executables use `--noconsole` — no terminal window appears.
-Run `quota-tracker.exe` once after building to register the watchdog in startup.
-
----
-
-## What this does NOT do (by design)
-
-These are explicit non-goals for this release, not oversights:
-
-- **No auto-update.** To update, download the new release and replace the `.exe`.
-- **No Linux support.** Antigravity IDE's Linux behavior is untested. Marked
-  unsupported rather than silently broken.
-- **No code signing / notarization for Mac.** On first launch, Gatekeeper will
-  show a security warning. Workaround: right-click the `.app` → Open.
-- **No multi-user / multi-machine sync.** Each install tracks its own local
-  SQLite independently. Use Tailscale or a VPS for multi-device access.
+**Via installer:** use **Add/Remove Programs** → "Antigravity Quota Tracker".
+The uninstaller kills running processes, removes the startup entry, reverts shortcut patches,
+and optionally (prompt, default: No) deletes your quota history.
 
 ---
 
 ## Repository structure
 
 ```
-antigravity-quota-tracker/
-├── main.py                    # Single entry point — also registers watchdog at startup
+AntiOptimizeGravity/
+├── main.py                    # Entry point — tracker, tray icon, Flask server
 ├── watchdog.py                # Auto-launcher: watches for Antigravity, launches tracker
-├── build.py                   # PyInstaller packaging — builds both tracker + watchdog exe
+├── build.py                   # PyInstaller packaging — builds tracker + watchdog exe
 ├── state.py                   # Shared app state (thread-safe singleton)
-├── webview_launcher.py        # Standalone PyWebView subprocess
-├── server/
-│   ├── flask_app.py           # Flask API server
-│   ├── db.py                  # SQLite queries
-│   └── ocr.py                 # OCR processing (Tesseract, optional)
-├── tray/
-│   └── tray_icon.py           # pystray tray icon + diagnostic mode
-├── notifier/
-│   ├── notifier.py            # CDP watcher (2 triggers: launch + GetTurnDiff)
-│   ├── config.example.env     # Configuration template
+├── server/                    # Flask API server + SQLite queries
+├── tray/                      # pystray tray icon + diagnostic mode
+├── notifier/                  # CDP watcher (2 triggers: launch + GetTurnDiff)
 │   └── requirements.txt       # Python dependencies
 ├── dashboard/
-│   └── public/                # Web dashboard (HTML/CSS/JS — unchanged)
+│   └── public/                # Web dashboard (HTML/CSS/JS)
+├── installer/
+│   └── setup.iss              # Inno Setup 6 installer script
+├── .github/workflows/
+│   └── release.yml            # GitHub Actions: build + release on v* tag push
 ├── scripts/
-│   ├── setup-windows.ps1      # Patches Antigravity shortcuts (one-time)
-│   ├── setup-mac.sh           # Creates ~/bin/antigravity-debug wrapper
-│   ├── uninstall-windows.ps1  # Removes tracker + watchdog from Windows
-│   └── uninstall-mac.sh       # Removes tracker from Mac
-├── README.md
-├── CONTRIBUTING.md
-└── LICENSE
+│   ├── setup-windows.ps1      # Manual shortcut patcher (for run-from-source users)
+│   ├── uninstall-windows.ps1  # Manual uninstall script
+│   └── setup-mac.sh / uninstall-mac.sh
+├── assets/
+│   └── icon.ico               # App icon (auto-generated by build.py via Pillow)
+└── README.md
 ```
+
+---
+
+## For Developers — Run from Source
+
+**Prerequisites:** Python 3.10+, git
+
+```bash
+git clone https://github.com/Abhishekog19/AntiOptimizeGravity
+cd AntiOptimizeGravity
+pip install -r notifier/requirements.txt
+powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1
+python main.py
+```
+
+Dashboard at **http://localhost:4300**. Right-click the tray icon for the menu.
+
+### Building the installer
+
+```bash
+pip install pyinstaller
+python build.py
+# Produces: dist/quota-tracker.exe + dist/quota-watchdog.exe
+
+# Then compile the installer (requires Inno Setup 6):
+# Download: https://jrsoftware.org/isdl.php
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\setup.iss
+# Produces: installer/AntigravityQuotaTrackerSetup.exe
+```
+
+### Automated releases (GitHub Actions)
+
+Tag a commit and push — the workflow handles everything:
+
+```bash
+git tag v1.0.0
+git push --tags
+```
+
+GitHub Actions will build both exes, compile the installer, create a GitHub Release,
+and attach `AntigravityQuotaTrackerSetup.exe` as the downloadable asset.
 
 ---
 
