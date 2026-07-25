@@ -48,6 +48,21 @@ Dashboard at **http://localhost:4300**. Right-click the tray icon for the menu.
 
 ---
 
+## How to start
+
+1. **Run `python main.py` once** after setup (or after a reboot) — this registers
+   the watchdog (`watchdog.py`) in Windows startup and then starts the tracker.
+2. **After that: just open Antigravity as normal** — the watchdog sees it appear
+   in the process list and launches the tracker automatically within 5 seconds.
+3. **No terminal, no manual commands ever again.** The tray icon is the only
+   visible output. The watchdog uses ~2 MB RAM and zero CPU when idle.
+
+> **What runs at startup:** only the tiny watchdog process. The tracker itself
+> does not start until Antigravity opens. Close Antigravity, reopen it — the
+> tracker launches again automatically.
+
+---
+
 ## Install — Mac
 
 > **Current Mac support status:** The setup script and core CDP watcher code
@@ -265,9 +280,15 @@ pressing Enter keeps your data.
 ```bash
 pip install pyinstaller
 python build.py
-# → dist/AntigravityQuotaTracker.exe   (Windows)
-# → dist/AntigravityQuotaTracker.app   (Mac, with LSUIElement patched)
+# Windows output:
+#   dist/quota-tracker.exe    (the main tracker)
+#   dist/quota-watchdog.exe   (the watchdog — registered in Windows startup)
+# macOS output:
+#   dist/AntigravityQuotaTracker.app   (with LSUIElement patched)
 ```
+
+Both Windows executables use `--noconsole` — no terminal window appears.
+Run `quota-tracker.exe` once after building to register the watchdog in startup.
 
 ---
 
@@ -289,8 +310,9 @@ These are explicit non-goals for this release, not oversights:
 
 ```
 antigravity-quota-tracker/
-├── main.py                    # Single entry point
-├── build.py                   # PyInstaller packaging (+ Mac LSUIElement patch)
+├── main.py                    # Single entry point — also registers watchdog at startup
+├── watchdog.py                # Auto-launcher: watches for Antigravity, launches tracker
+├── build.py                   # PyInstaller packaging — builds both tracker + watchdog exe
 ├── state.py                   # Shared app state (thread-safe singleton)
 ├── webview_launcher.py        # Standalone PyWebView subprocess
 ├── server/
@@ -308,7 +330,7 @@ antigravity-quota-tracker/
 ├── scripts/
 │   ├── setup-windows.ps1      # Patches Antigravity shortcuts (one-time)
 │   ├── setup-mac.sh           # Creates ~/bin/antigravity-debug wrapper
-│   ├── uninstall-windows.ps1  # Removes tracker from Windows
+│   ├── uninstall-windows.ps1  # Removes tracker + watchdog from Windows
 │   └── uninstall-mac.sh       # Removes tracker from Mac
 ├── README.md
 ├── CONTRIBUTING.md
