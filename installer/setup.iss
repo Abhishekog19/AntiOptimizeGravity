@@ -53,14 +53,17 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
-; Show finish page with custom message
-FinishMessage=Setup complete!%n%nOpen Antigravity IDE — the tracker will start automatically within a few seconds.%n%nLook for a coloured dot in your system tray (^ button near the clock).%n%nRight-click the dot to open the dashboard or access settings.
+
+[Messages]
+; Custom finish-page message — shown at the bottom of the Finished page.
+; Note: %n is the newline character in Inno Setup messages.
+FinishedLabel=Setup complete!%n%nOpen Antigravity IDE — the tracker will start automatically within a few seconds.%n%nLook for a coloured dot in your system tray (^ button near the clock).%n%nRight-click the dot to open the dashboard or access settings.
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-; Both executables — must be in the same directory (watchdog locates tracker by sibling path)
+; Both executables must be in the same directory (watchdog locates tracker by sibling path)
 Source: "{#SrcDir}\quota-tracker.exe";  DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SrcDir}\quota-watchdog.exe"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -69,9 +72,8 @@ Name: "{group}\{#MyAppName}";        Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
 [Registry]
-; Register watchdog in HKCU Run — starts with Windows login, no admin needed
-Root: HKCU; Subkey: "{#MyRegKey}"; ValueType: string; ValueName: "{#MyRegValueName}"; \
-  ValueData: """{app}\{#MyWatchdogExe}"""; Flags: uninsdeletevalue
+; Register watchdog in HKCU Run (starts with Windows login, no admin needed)
+Root: HKCU; Subkey: "{#MyRegKey}"; ValueType: string; ValueName: "{#MyRegValueName}"; ValueData: """{app}\{#MyWatchdogExe}"""; Flags: uninsdeletevalue
 
 [Run]
 ; After install: launch the watchdog immediately (no reboot needed)
@@ -82,8 +84,8 @@ Filename: "{app}\{#MyWatchdogExe}"; \
 
 [UninstallRun]
 ; Kill tracker and watchdog before uninstalling files
-Filename: "taskkill.exe"; Parameters: "/F /IM quota-tracker.exe";  Flags: runhidden; RunOnceId: "KillTracker"
-Filename: "taskkill.exe"; Parameters: "/F /IM quota-watchdog.exe"; Flags: runhidden; RunOnceId: "KillWatchdog"
+Filename: "taskkill.exe"; Parameters: "/F /IM quota-tracker.exe";  Flags: runhidden
+Filename: "taskkill.exe"; Parameters: "/F /IM quota-watchdog.exe"; Flags: runhidden
 
 [Code]
 // ─── Pascal Script ─────────────────────────────────────────────────────────

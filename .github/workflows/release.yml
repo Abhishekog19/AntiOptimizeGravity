@@ -69,14 +69,37 @@ jobs:
           $env:PATH += ";C:\Program Files (x86)\Inno Setup 6"
           ISCC.exe /? 2>&1 | Select-Object -First 2
 
-      # ── 7. Compile the Inno Setup installer ──────────────────────────────────
+      # ── 7. Compile the Inno Setup installer ──────────────────────────────────────
       - name: Compile installer (ISCC)
         shell: pwsh
         run: |
-          $ISCC = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          $iss  = "installer\setup.iss"
-          & $ISCC $iss
-          if ($LASTEXITCODE -ne 0) { Write-Error "ISCC failed with exit code $LASTEXITCODE"; exit 1 }
+          # Locate ISCC.exe — Chocolatey can install to either path
+          $isccPaths = @(
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+            "C:\Program Files\Inno Setup 6\ISCC.exe"
+          )
+          $ISCC = $isccPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $ISCC) {
+            # Try PATH as last resort
+            $ISCC = (Get-Command ISCC.exe -ErrorAction SilentlyContinue)?.Source
+          }
+          if (-not $ISCC) { Write-Error "ISCC.exe not found"; exit 1 }
+          Write-Host "ISCC.exe found at: $ISCC"
+
+          # Show source files that ISCC will need
+          Write-Host "--- dist/ contents ---"
+          Get-ChildItem dist -ErrorAction SilentlyContinue | Select-Object Name, Length
+          Write-Host "--- assets/ contents ---"
+          Get-ChildItem assets -ErrorAction SilentlyContinue | Select-Object Name
+
+          # Compile
+          $output = & $ISCC "installer\setup.iss" 2>&1
+          $output | ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "ISCC failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+
           $setup = "installer\AntigravityQuotaTrackerSetup.exe"
           if (-not (Test-Path $setup)) { Write-Error "Setup exe not found at $setup"; exit 1 }
           $mb = [math]::Round((Get-Item $setup).Length / 1MB, 1)
