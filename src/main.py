@@ -82,7 +82,7 @@ def _load_env(path: Path) -> None:
             os.environ[k] = v.strip().strip('"').strip("'")
 
 _load_env(_ROOT / "notifier" / ".env")
-_load_env(_ROOT / "dashboard" / ".env")
+
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 _LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()

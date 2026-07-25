@@ -19,10 +19,12 @@ from typing import Optional
 
 # ── Database location ─────────────────────────────────────────────────────────
 # Stored at the same path as the old Node.js version for backwards-compat.
-_HERE    = Path(__file__).parent.parent  # project root
+# db.py is at src/server/db.py — three .parent calls reach the repo root.
+_HERE     = Path(__file__).parent.parent.parent  # src/server → src → repo root
 _DATA_DIR = _HERE / "dashboard" / "data"
 _DATA_DIR.mkdir(parents=True, exist_ok=True)
 _DB_PATH  = _DATA_DIR / "quota.db"
+
 
 # ── Connection (module-level singleton, check_same_thread=False for Flask) ────
 _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)

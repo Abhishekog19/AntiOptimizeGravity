@@ -28,7 +28,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1
 bash scripts/setup-mac.sh
 
 # Start the tracker
-python main.py
+python src/main.py
 ```
 
 The tray icon appears immediately. The dashboard is at `http://localhost:4300`.
@@ -36,8 +36,8 @@ The tray icon appears immediately. The dashboard is at `http://localhost:4300`.
 **Running the notifier standalone (no tray/dashboard):**
 
 ```bash
-python notifier/notifier.py --dry-run   # log only, no POST / toasts
-python notifier/notifier.py --verbose   # DEBUG-level logging
+python src/notifier/notifier.py --dry-run   # log only, no POST / toasts
+python src/notifier/notifier.py --verbose   # DEBUG-level logging
 ```
 
 ---

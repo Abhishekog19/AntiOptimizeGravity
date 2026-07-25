@@ -28,8 +28,10 @@ from server import db
 log = logging.getLogger(__name__)
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-_HERE       = Path(__file__).parent.parent          # project root
-_PUBLIC_DIR = _HERE / "dashboard" / "public"        # static files (unchanged)
+# flask_app.py is at src/server/flask_app.py — three .parent calls reach repo root.
+_HERE       = Path(__file__).parent.parent.parent   # src/server → src → repo root
+_PUBLIC_DIR = _HERE / "dashboard" / "public"        # static files
+
 
 # ── Config (from environment / .env loaded by main.py) ────────────────────────
 API_KEY        = os.environ.get("DASHBOARD_API_KEY", "")

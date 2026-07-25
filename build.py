@@ -40,10 +40,10 @@ IS_MAC     = sys.platform == "darwin"
 
 # ── Data files bundled with the tracker ───────────────────────────────────────
 DATA_FILES = [
-    (ROOT / "dashboard" / "public", "dashboard/public"),
-    (ROOT / "notifier" / "config.example.env", "notifier"),
+    (ROOT / "dashboard" / "public",              "dashboard/public"),
+    (ROOT / "src" / "notifier" / "config.example.env", "notifier"),
 ]
-_ENV_FILE = ROOT / "notifier" / ".env"
+_ENV_FILE = ROOT / "src" / "notifier" / ".env"
 if _ENV_FILE.exists():
     DATA_FILES.append((_ENV_FILE, "notifier"))
 
@@ -169,8 +169,11 @@ def build_tracker(onefile: bool = True, debug: bool = False) -> Path:
     for pkg in ("pystray", "PIL", "flask", "werkzeug"):
         cmd.append(f"--collect-all={pkg}")
 
+    # Add src/ to the module search path so PyInstaller finds server/, tray/, etc.
+    cmd.append(f"--paths={ROOT / 'src'}")
+
     cmd.extend(_data_args())
-    cmd.append(str(ROOT / "main.py"))
+    cmd.append(str(ROOT / "src" / "main.py"))
 
     _run_pyinstaller(cmd)
 
@@ -227,7 +230,9 @@ def build_watchdog(onefile: bool = True, debug: bool = False) -> Path | None:
 
     cmd.append("--hidden-import=psutil")
     cmd.append("--collect-all=psutil")
-    cmd.append(str(ROOT / "watchdog.py"))
+    # Add src/ so watchdog can import anything from src/ if needed
+    cmd.append(f"--paths={ROOT / 'src'}")
+    cmd.append(str(ROOT / "src" / "watchdog.py"))
 
     _run_pyinstaller(cmd)
 

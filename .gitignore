@@ -21,6 +21,7 @@ dashboard/data/
 
 # ── Log files ─────────────────────────────────────────────────────────────────
 *.log
+crash_log.txt
 
 # ── Secrets / environment overrides ───────────────────────────────────────────
 # Real .env files are never committed. Example/template files are intentionally
