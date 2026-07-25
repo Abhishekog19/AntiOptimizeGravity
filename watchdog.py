@@ -57,19 +57,25 @@ ANTIGRAVITY_NAME = "antigravity ide"   # substring match on process name (lower)
 
 # ---------------------------------------------------------------------------
 # Tracker command
-# Always use python.exe (NOT pythonw.exe) to launch main.py.
-# pythonw.exe suppresses the Windows message pump that pystray needs
-# to register the tray icon in the notification area.
 # ---------------------------------------------------------------------------
 if getattr(sys, "frozen", False):
     _TRACKER_EXE = _HERE / "quota-tracker.exe"
     _TRACKER_CMD = [str(_TRACKER_EXE)]
 else:
     _TRACKER_SCRIPT = _HERE / "main.py"
-    _python_exe = Path(sys.executable).parent / "python.exe"
-    if not _python_exe.exists():
-        _python_exe = Path(sys.executable)
-    _TRACKER_CMD = [str(_python_exe), str(_TRACKER_SCRIPT)]
+    # Use pythonw.exe (GUI subsystem, no console) to launch the tracker.
+    #
+    # Why pythonw and not python.exe?
+    # - python.exe is a console app. When spawned by pythonw (no console),
+    #   Windows creates a NEW console window — the ugly black terminal flash.
+    # - pythonw.exe is a GUI app. When spawned by pythonw, no console window
+    #   is ever created, but the interactive desktop is fully inherited so
+    #   Shell_NotifyIcon (pystray tray icon) works correctly.
+    # - stdout/stderr are redirected to tracker.log, so nothing is lost.
+    _pythonw_exe = Path(sys.executable).parent / "pythonw.exe"
+    if not _pythonw_exe.exists():
+        _pythonw_exe = Path(sys.executable).parent / "python.exe"  # fallback
+    _TRACKER_CMD = [str(_pythonw_exe), str(_TRACKER_SCRIPT)]
 
 _MY_PID = os.getpid()
 log.info(f"Watchdog started PID={_MY_PID}")
@@ -97,18 +103,37 @@ def antigravity_running() -> bool:
 # ---------------------------------------------------------------------------
 
 def launch_tracker() -> "subprocess.Popen | None":
-    """Spawn the tracker. Returns the Popen handle, or None on failure."""
-    log.info(f"Launching tracker...")
+    """Spawn the tracker. Returns the Popen handle, or None on failure.
+
+    No special creationflags are used here intentionally.
+
+    When the watchdog (pythonw.exe, no console) spawns python.exe with no
+    flags, the child inherits the parent's window station and interactive
+    desktop — which is required for Shell_NotifyIcon to show the tray icon.
+    No console window will flash because pythonw.exe has no console to
+    pass down. CREATE_NO_WINDOW and DETACHED_PROCESS both restrict the
+    desktop context and cause the tray icon to register but never appear.
+
+    stdout/stderr are redirected to tracker.log so there is no visible
+    console even if the fallback interpreter is python.exe.
+    """
+    log.info("Launching tracker...")
+    tracker_log = _HERE / "tracker.log"
     try:
-        proc = subprocess.Popen(
-            _TRACKER_CMD,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        log.info(f"Tracker launched PID={proc.pid}")
+        with open(tracker_log, "a", encoding="utf-8") as fout:
+            proc = subprocess.Popen(
+                _TRACKER_CMD,
+                stdout=fout,
+                stderr=fout,
+                # No creationflags — child inherits interactive desktop from
+                # the pythonw.exe watchdog, which is what pystray needs.
+            )
+        log.info(f"Tracker launched PID={proc.pid}  (output -> tracker.log)")
         return proc
     except Exception as exc:
         log.error(f"Failed to launch tracker: {exc}")
         return None
+
 
 
 def kill_tracker(proc: "subprocess.Popen") -> None:
@@ -191,7 +216,7 @@ def main() -> None:
                 close_count = 0
                 # Relaunch if tracker died unexpectedly while AG is open
                 if tracker_proc is not None and not is_alive(tracker_proc):
-                    log.warning(f"Tracker died unexpectedly (exit={tracker_proc.returncode}), relaunching...")
+                    log.warning(f"Tracker died unexpectedly (exit={tracker_proc.returncode}). Check tracker.log for details. Relaunching...")
                     tracker_proc = launch_tracker()
 
             ag_was_running = ag_now

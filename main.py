@@ -86,11 +86,24 @@ _load_env(_ROOT / "dashboard" / ".env")
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 _LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+
+# Build handlers: always write to stderr if available; stdout may be None
+# when running under pythonw.exe (no console, launched by the watchdog).
+_log_handlers: list = []
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None:
+        try:
+            _stream.fileno()   # raises OSError if stream is not a real file
+            _log_handlers.append(logging.StreamHandler(_stream))
+            break
+        except Exception:
+            pass
+
 logging.basicConfig(
     level=getattr(logging, _LOG_LEVEL, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
-    stream=sys.stdout,
+    handlers=_log_handlers if _log_handlers else [logging.NullHandler()],
 )
 log = logging.getLogger("main")
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
