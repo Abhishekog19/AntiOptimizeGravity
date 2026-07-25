@@ -173,13 +173,17 @@ begin
     if Pos(CDPArgument, Args) > 0 then
     begin
       // Remove the flag and any surrounding spaces
+      // StringChangeEx is the IS Pascal equivalent of Delphi's StringReplace.
+      // It modifies S in-place (var param) and returns the replacement count.
+      // Always replaces all occurrences; SupportEnvVars=False for literal match.
       NewArgs := Args;
-      NewArgs := StringReplace(NewArgs, ' ' + CDPArgument, '', [rfReplaceAll]);
-      NewArgs := StringReplace(NewArgs, CDPArgument + ' ', '', [rfReplaceAll]);
-      NewArgs := StringReplace(NewArgs, CDPArgument, '',       [rfReplaceAll]);
+      StringChangeEx(NewArgs, ' ' + CDPArgument, '', False);
+      StringChangeEx(NewArgs, CDPArgument + ' ', '', False);
+      StringChangeEx(NewArgs, CDPArgument,        '', False);
       // Trim leading/trailing whitespace
       while (Length(NewArgs) > 0) and (NewArgs[1] = ' ')  do Delete(NewArgs, 1, 1);
       while (Length(NewArgs) > 0) and (NewArgs[Length(NewArgs)] = ' ') do Delete(NewArgs, Length(NewArgs), 1);
+
       Link.Arguments := NewArgs;
       Link.Save();
       Log('Reverted shortcut: ' + LnkPath);
