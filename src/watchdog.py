@@ -12,8 +12,25 @@ processes on every poll -- this eliminates false-positive detection that was
 causing the tracker to be killed immediately after launch.
 
 Log: watchdog.log in the same directory as this script.
+
+CWD note: the very first thing this module does (before any other imports or
+path resolution) is chdir to its own directory.  This guarantees that every
+subsequent path built from __file__ is correct regardless of how the process
+was started — e.g. via the Windows Run registry key, which launches with no
+defined working directory (often defaults to System32).
 """
-from __future__ import annotations
+
+from __future__ import annotations   # must precede all other statements
+
+# ── Step 0: Pin CWD to this script's directory ────────────────────────────────
+# Must be the first executable code (right after __future__) so that every
+# subsequent open(), FileHandler, Popen, and Path(__file__).parent call works
+# correctly regardless of launch context (e.g. the Windows Run key provides no
+# defined CWD and often defaults to System32 — every relative path breaks).
+import os as _os
+from pathlib import Path as _Path
+_os.chdir(_Path(__file__).resolve().parent)
+# ─────────────────────────────────────────────────────────────────────────────
 
 import os
 import sys
@@ -24,13 +41,43 @@ import psutil
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths — all absolute, anchored to this script's location.
+# Using .resolve() guards against symlinks and any leftover relative components.
 # ---------------------------------------------------------------------------
-_HERE     = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
+_HERE     = Path(__file__).resolve().parent
 _LOG_FILE = _HERE / "watchdog.log"
+_CRASH_LOG = _HERE / "watchdog_crash.log"
 
 # ---------------------------------------------------------------------------
-# Logging -- always write to file; add stdout only when in a real console
+# Startup crash guard — wraps the ENTIRE module-level setup so that any
+# import error, missing-dependency crash, or path failure that occurs before
+# the main loop is running gets written to an absolute-path file.
+# Under pythonw.exe there is no console, so without this the process dies
+# completely invisibly.
+# ---------------------------------------------------------------------------
+def _write_startup_crash(exc: BaseException) -> None:
+    """Write a startup crash to watchdog_crash.log (absolute path)."""
+    import traceback as _tb
+    import datetime as _dt
+    ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sep = "=" * 70
+    entry = (
+        f"\n{sep}\n"
+        f"WATCHDOG STARTUP CRASH  {ts}\n"
+        f"{sep}\n"
+        f"{_tb.format_exc()}"
+        f"{sep}\n"
+    )
+    try:
+        with open(_CRASH_LOG, "a", encoding="utf-8") as fh:
+            fh.write(entry)
+    except OSError:
+        pass  # absolute nothing we can do here
+
+
+# ---------------------------------------------------------------------------
+# Logging -- always write to file (absolute path); add stdout only when in
+# a real console.
 # ---------------------------------------------------------------------------
 _handlers: list = [logging.FileHandler(_LOG_FILE, encoding="utf-8", mode="a")]
 try:
@@ -56,13 +103,13 @@ CLOSE_DEBOUNCE   = 3     # consecutive absent polls before killing tracker
 ANTIGRAVITY_NAME = "antigravity ide"   # substring match on process name (lower)
 
 # ---------------------------------------------------------------------------
-# Tracker command
+# Tracker command — all paths are absolute, built from _HERE.
 # ---------------------------------------------------------------------------
 if getattr(sys, "frozen", False):
     _TRACKER_EXE = _HERE / "quota-tracker.exe"
     _TRACKER_CMD = [str(_TRACKER_EXE)]
 else:
-    _TRACKER_SCRIPT = _HERE / "main.py"
+    _TRACKER_SCRIPT = _HERE / "main.py"   # src/main.py — absolute
     # Use pythonw.exe (GUI subsystem, no console) to launch the tracker.
     #
     # Why pythonw and not python.exe?
@@ -78,7 +125,8 @@ else:
     _TRACKER_CMD = [str(_pythonw_exe), str(_TRACKER_SCRIPT)]
 
 _MY_PID = os.getpid()
-log.info(f"Watchdog started PID={_MY_PID}")
+log.info(f"Watchdog started PID={_MY_PID}  cwd={os.getcwd()!r}")
+log.info(f"_HERE={_HERE}")
 log.info(f"Tracker cmd: {_TRACKER_CMD}")
 
 
@@ -116,15 +164,20 @@ def launch_tracker() -> "subprocess.Popen | None":
 
     stdout/stderr are redirected to tracker.log so there is no visible
     console even if the fallback interpreter is python.exe.
+
+    cwd is explicitly set to _HERE (the src/ directory) so that main.py's
+    own __file__-relative paths resolve correctly regardless of what CWD
+    the watchdog inherited from the Windows Run key.
     """
     log.info("Launching tracker...")
-    tracker_log = _HERE / "tracker.log"
+    tracker_log = _HERE / "tracker.log"   # absolute path
     try:
         with open(tracker_log, "a", encoding="utf-8") as fout:
             proc = subprocess.Popen(
                 _TRACKER_CMD,
                 stdout=fout,
                 stderr=fout,
+                cwd=str(_HERE),   # pin tracker's CWD to src/ — same guarantee
                 # No creationflags — child inherits interactive desktop from
                 # the pythonw.exe watchdog, which is what pystray needs.
             )
@@ -228,4 +281,19 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # ── Top-level crash guard ──────────────────────────────────────────────
+    # Any exception that escapes main() (including startup failures like a
+    # missing psutil import) is written to watchdog_crash.log at an absolute
+    # path before we exit.  Under pythonw.exe this is the ONLY way to see
+    # what went wrong — there is no console, no dialog, nothing else.
+    try:
+        main()
+    except KeyboardInterrupt:
+        log.info("Watchdog stopped by KeyboardInterrupt")
+    except Exception as exc:
+        _write_startup_crash(exc)
+        log.error(f"Watchdog crashed: {exc}", exc_info=True)
+        raise
+    except BaseException as exc:
+        _write_startup_crash(exc)
+        raise

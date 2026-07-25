@@ -14,6 +14,16 @@ All threads share the app_state singleton (state.py) for live status.
 """
 from __future__ import annotations   # must be first statement after docstring
 
+# ── Step 0: Pin CWD to this script's directory ────────────────────────────────
+# Must run before any other import or path resolution so that every subsequent
+# open(), FileHandler, and Path(__file__).parent call is correct regardless of
+# how the process was started (e.g. the Windows Run key provides no defined CWD
+# and often defaults to System32 — every relative path would silently break).
+import os as _os
+from pathlib import Path as _Path
+_os.chdir(_Path(__file__).resolve().parent)
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ── PyInstaller packaged-exe WebView launcher early-exit ──────────────────────
 # When the tray opens the dashboard it spawns:
 #   AntigravityQuotaTracker.exe --webview-launcher http://localhost:4300
@@ -189,7 +199,7 @@ def _write_event(label: str, detail: str = "") -> None:
 
 # Write startup marker immediately — this guarantees crash_log.txt exists
 # so we can tell 'file never written' from 'program killed externally'.
-_write_event("STARTED", f"argv={sys.argv!r}")
+_write_event("STARTED", f"argv={sys.argv!r}  cwd={_os.getcwd()!r}")
 
 import atexit as _atexit
 _atexit.register(lambda: _write_event("CLEAN EXIT"))
