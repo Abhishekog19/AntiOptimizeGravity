@@ -19,13 +19,11 @@
     </div>
     <nav class="tab-nav" role="tablist">
       <button id="tab-overview"  class="tab-btn active" role="tab" aria-selected="true"  aria-controls="pane-overview">Overview</button>
-      <button id="tab-capture"   class="tab-btn"        role="tab" aria-selected="false" aria-controls="pane-capture">Capture</button>
       <button id="tab-analytics" class="tab-btn"        role="tab" aria-selected="false" aria-controls="pane-analytics">Analytics</button>
     </nav>
     <div class="topbar-meta">
-      <!-- Notifier status dot: green=live, yellow=stale, red=offline -->
-      <div class="notifier-status" id="notifierStatus" title="Notifier status">
-        <span class="status-dot" id="statusDot"></span>
+      <div class="notifier-status" id="notifierStatus" title="Notifier status" aria-label="Tracker connectivity status">
+        <span class="status-dot" id="statusDot" aria-hidden="true"></span>
         <span class="status-label" id="statusLabel">—</span>
       </div>
       <span id="clock" class="mono"></span>
@@ -33,129 +31,24 @@
     </div>
   </header>
 
-
-  <!-- ── Tesseract warning banner (hidden when OK) ─────────────────────── -->
-  <div id="tesseractWarning" class="settings-warning" hidden role="alert">
-    <span class="settings-warning-icon">⚠</span>
-    <span id="tesseractWarningText">Tesseract not configured — OCR captures will not work.</span>
-    <a href="#pane-capture" class="settings-warning-link">Set up in .env</a>
-  </div>
-
   <!-- ═══════════════════════════ OVERVIEW PANE ════════════════════════════ -->
   <main id="pane-overview" class="pane active" role="tabpanel" aria-labelledby="tab-overview">
-    <section id="recommendation" class="recommendation" hidden>
-      <div class="recommendation-label">Use next</div>
-      <div class="recommendation-body">
-        <div class="recommendation-name" id="recName">—</div>
-        <div class="recommendation-why" id="recWhy">—</div>
-      </div>
-    </section>
 
-    <section class="grid" id="grid"></section>
+    <!-- Analytics strip: visible at standard + full modes only (CSS-driven) -->
+    <div id="analyticsStrip" class="analytics-strip" aria-label="Analytics summary"></div>
+
+    <!-- Hero card: Glance mode only — recommended account as primary element -->
+    <div id="heroCard" class="hero-card" aria-label="Recommended account"></div>
+
+    <!-- Compact list: Glance mode only — remaining accounts, name + pcts only -->
+    <div id="compactList" class="compact-list" aria-label="Other accounts"></div>
+
+    <!-- Account grid: Compact / Standard / Full modes -->
+    <section class="grid" id="grid" aria-label="Account cards"></section>
 
     <p id="emptyState" class="empty-state" hidden>
-      No readings yet. Use the <strong>Capture</strong> tab to paste a screenshot
-      of your Settings → Models panel and save a reading.
+      No readings yet. Open Antigravity IDE — the tracker will capture your quota automatically.
     </p>
-  </main>
-
-  <!-- ═══════════════════════════ CAPTURE PANE ═════════════════════════════ -->
-  <main id="pane-capture" class="pane" role="tabpanel" aria-labelledby="tab-capture" hidden>
-    <div class="capture-layout">
-
-      <!-- Step 1: Image input -->
-      <section class="capture-card">
-        <div class="capture-step-label">Step 1 — Screenshot</div>
-        <p class="capture-hint">
-          Take a screenshot of <strong>Settings → Models</strong> in Antigravity
-          (<kbd>Win+Shift+S</kbd> crops it), then paste it here or use the file picker.
-        </p>
-
-        <div id="pasteZone" class="paste-zone" tabindex="0" role="button"
-             aria-label="Paste or drop screenshot here">
-          <div class="paste-zone-inner">
-            <svg class="paste-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-              <rect x="8" y="2" width="8" height="4" rx="1"/>
-              <path d="M6 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-1"/>
-              <path d="M12 11v6M9 14l3-3 3 3"/>
-            </svg>
-            <span class="paste-zone-label">Paste image (Ctrl+V) or drop here</span>
-            <span class="paste-zone-sub">PNG or JPEG · max 20 MB</span>
-          </div>
-        </div>
-
-        <div class="file-input-row">
-          <label for="fileInput" class="ghost-btn file-label">Choose file…</label>
-          <input id="fileInput" type="file" accept="image/*" class="sr-only" />
-        </div>
-
-        <img id="imagePreview" class="image-preview" hidden alt="Pasted screenshot preview" />
-      </section>
-
-      <!-- Step 2: OCR preview + manual edit -->
-      <section class="capture-card" id="ocrCard" hidden>
-        <div class="capture-step-label">Step 2 — Confirm numbers</div>
-
-        <div id="ocrStatus" class="ocr-status"></div>
-
-        <div class="ocr-fields">
-          <div class="ocr-section-head">Claude / GPT</div>
-          <div class="ocr-row">
-            <label for="f-claude-weekly">Weekly remaining %</label>
-            <input id="f-claude-weekly" type="number" min="0" max="100" class="ocr-input" placeholder="—" />
-          </div>
-          <div class="ocr-row">
-            <label for="f-claude-5hr">5-hour remaining %</label>
-            <input id="f-claude-5hr" type="number" min="0" max="100" class="ocr-input" placeholder="—" />
-          </div>
-          <div class="ocr-row">
-            <label for="f-claude-reset">Weekly reset (raw text)</label>
-            <input id="f-claude-reset" type="text" class="ocr-input" placeholder="e.g. 6 days, 22 hours" />
-          </div>
-          <div class="ocr-row">
-            <label for="f-claude-fivehour-reset">Five-hour reset (raw text)</label>
-            <input id="f-claude-fivehour-reset" type="text" class="ocr-input" placeholder="e.g. 1 hour, 42 minutes" />
-          </div>
-
-          <div class="ocr-section-head" style="margin-top:16px">Gemini</div>
-          <div class="ocr-row">
-            <label for="f-gemini-weekly">Weekly remaining %</label>
-            <input id="f-gemini-weekly" type="number" min="0" max="100" class="ocr-input" placeholder="— (optional)" />
-          </div>
-          <div class="ocr-row">
-            <label for="f-gemini-5hr">5-hour remaining %</label>
-            <input id="f-gemini-5hr" type="number" min="0" max="100" class="ocr-input" placeholder="— (optional)" />
-          </div>
-          <div class="ocr-row">
-            <label for="f-gemini-reset">Weekly reset (raw text)</label>
-            <input id="f-gemini-reset" type="text" class="ocr-input" placeholder="— (optional)" />
-          </div>
-          <div class="ocr-row">
-            <label for="f-gemini-fivehour-reset">Five-hour reset (raw text)</label>
-            <input id="f-gemini-fivehour-reset" type="text" class="ocr-input" placeholder="— (optional)" />
-          </div>
-        </div>
-
-        <!-- Step 3: Account + save -->
-        <div class="ocr-section-head" style="margin-top:20px">Step 3 — Account</div>
-        <div class="ocr-row">
-          <label for="accountSelect">Account</label>
-          <select id="accountSelect" class="ocr-input ocr-select">
-            <option value="">— select or type new —</option>
-          </select>
-        </div>
-        <div class="ocr-row" id="newAccountRow" hidden>
-          <label for="newAccountId">New account ID</label>
-          <input id="newAccountId" type="text" class="ocr-input" placeholder="e.g. account-3" />
-        </div>
-
-        <div class="save-row">
-          <button id="saveReadingBtn" class="primary-btn">Confirm &amp; Save</button>
-          <span id="saveStatus" class="save-status"></span>
-        </div>
-      </section>
-
-    </div>
   </main>
 
   <!-- ══════════════════════════ ANALYTICS PANE ════════════════════════════ -->
@@ -171,7 +64,7 @@
       <div id="accountFilters" class="account-filters"></div>
     </div>
 
-    <!-- Projection + session counter -->
+    <!-- Stat cards: visible at standard + full -->
     <div class="analytics-meta-row">
       <div class="analytics-stat-card" id="projectionCard">
         <div class="analytics-stat-label">Projection</div>
@@ -183,7 +76,7 @@
       </div>
     </div>
 
-    <!-- Burn-rate chart -->
+    <!-- Charts: full mode only (hidden by CSS in standard mode) -->
     <div class="analytics-chart-card">
       <div class="analytics-chart-title">Claude / GPT — Weekly Usage %</div>
       <div class="chart-wrap">
@@ -191,13 +84,11 @@
       </div>
     </div>
 
-    <!-- Heatmap -->
     <div class="analytics-chart-card">
       <div class="analytics-chart-title">Avg weekly consumption by day of week</div>
       <div id="heatmapGrid" class="heatmap-grid"></div>
     </div>
 
-    <!-- Per-account efficiency -->
     <div class="analytics-chart-card">
       <div class="analytics-chart-title">Per-account efficiency</div>
       <div id="efficiencyList" class="efficiency-list"></div>
@@ -205,7 +96,7 @@
 
   </main>
 
-  <!-- ────────────── Detail overlay (unchanged) ─────────────── -->
+  <!-- ────────────── Detail overlay ─────────────── -->
   <div id="detailOverlay" class="detail-overlay" hidden>
     <div class="detail-panel">
       <button id="closeDetail" class="ghost-btn close-btn">Close</button>
