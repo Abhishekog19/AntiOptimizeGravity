@@ -161,12 +161,21 @@ def build_tracker(onefile: bool = True, debug: bool = False) -> Path:
         "sqlite3",
         "win10toast",
         "pkg_resources",
+        # notifier is a local package (src/notifier/) with an __init__.py that
+        # re-exports from notifier.notifier — both must be explicitly listed
+        # because PyInstaller does not auto-discover local packages after a
+        # folder restructure the same way pip-installed packages are discovered.
+        "notifier",
+        "notifier.notifier",
     ]
     for h in hidden:
         cmd.append(f"--hidden-import={h}")
 
-    # Collect full packages (data files + submodules) for tricky packages
-    for pkg in ("pystray", "PIL", "flask", "werkzeug"):
+    # Collect full packages (data files + submodules) for tricky packages.
+    # notifier is a local package — must be listed explicitly; PyInstaller
+    # does not auto-collect local packages after a src/ folder restructure
+    # (same issue that required --collect-all pystray in the Final Phase work).
+    for pkg in ("pystray", "PIL", "flask", "werkzeug", "notifier"):
         cmd.append(f"--collect-all={pkg}")
 
     # Add src/ to the module search path so PyInstaller finds server/, tray/, etc.
