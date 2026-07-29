@@ -28,9 +28,17 @@ from server import db
 log = logging.getLogger(__name__)
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-# flask_app.py is at src/server/flask_app.py — three .parent calls reach repo root.
-_HERE       = Path(__file__).parent.parent.parent   # src/server → src → repo root
-_PUBLIC_DIR = _HERE / "dashboard" / "public"        # static files
+# When frozen by PyInstaller (--add-data), bundled data lands in sys._MEIPASS,
+# NOT relative to __file__ (which points into the extraction temp dir).
+# In dev mode, walk up: src/server/flask_app.py → src/server → src → repo root.
+import sys as _sys
+
+if getattr(_sys, "frozen", False) and hasattr(_sys, "_MEIPASS"):
+    # Frozen exe: PyInstaller extracted everything into _MEIPASS
+    _PUBLIC_DIR = Path(_sys._MEIPASS) / "dashboard" / "public"
+else:
+    # Dev mode: flask_app.py is at src/server/ → go up 3 levels to repo root
+    _PUBLIC_DIR = Path(__file__).parent.parent.parent / "dashboard" / "public"
 
 
 # ── Config (from environment / .env loaded by main.py) ────────────────────────

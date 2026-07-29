@@ -101,6 +101,9 @@ log = logging.getLogger("watchdog")
 POLL_INTERVAL    = 3     # seconds between process checks
 CLOSE_DEBOUNCE   = 3     # consecutive absent polls before killing tracker
 ANTIGRAVITY_NAME = "antigravity ide"   # substring match on process name (lower)
+TRACKER_EXE_NAME = "quota-tracker.exe" # used for orphan-kill by name
+CRASH_LIMIT      = 5    # stop relaunching after this many consecutive rapid crashes
+CRASH_WINDOW_S   = 10   # a crash within this many seconds of launch counts as rapid
 
 # ---------------------------------------------------------------------------
 # Tracker command — all paths are absolute, built from _HERE.
@@ -216,6 +219,41 @@ def kill_tracker(proc: "subprocess.Popen") -> None:
     log.info("Tracker killed")
 
 
+def kill_tracker_by_name() -> None:
+    """Kill any orphaned quota-tracker.exe processes not owned by this watchdog.
+
+    Called when Antigravity closes and tracker_proc is None (e.g. the watchdog
+    was restarted after a build and lost its Popen handle, but a stale tracker
+    process is still running).
+    """
+    killed = 0
+    for p in psutil.process_iter(["name", "pid"]):
+        try:
+            if (p.info["name"] or "").lower() == TRACKER_EXE_NAME.lower():
+                log.info(f"Killing orphaned tracker PID={p.pid} by name...")
+                proc = psutil.Process(p.pid)
+                children = proc.children(recursive=True)
+                for ch in children:
+                    try:
+                        ch.terminate()
+                    except Exception:
+                        pass
+                proc.terminate()
+                _, alive = psutil.wait_procs([proc] + children, timeout=3)
+                for ap in alive:
+                    try:
+                        ap.kill()
+                    except Exception:
+                        pass
+                killed += 1
+        except (psutil.NoSuchProcess, ProcessLookupError):
+            pass
+        except Exception as exc:
+            log.debug(f"kill_by_name error: {exc}")
+    if killed:
+        log.info(f"Orphan kill: terminated {killed} stale tracker process(es)")
+
+
 def is_alive(proc: "subprocess.Popen") -> bool:
     """Check whether our launched subprocess is still running."""
     try:
@@ -232,6 +270,8 @@ def main() -> None:
     tracker_proc: "subprocess.Popen | None" = None
     ag_was_running = False
     close_count    = 0      # consecutive polls where AG is absent
+    crash_count    = 0      # consecutive rapid crashes
+    _last_launch_t = 0.0    # time of last tracker launch (for crash window check)
 
     log.info(f"Polling every {POLL_INTERVAL}s  close_debounce={CLOSE_DEBOUNCE}")
 
@@ -242,10 +282,12 @@ def main() -> None:
             if ag_now and not ag_was_running:
                 # ---- Rising edge: Antigravity just appeared ----------------
                 close_count = 0
+                crash_count = 0
                 log.info("Antigravity opened. Waiting 3 s for CDP port...")
                 time.sleep(3)
                 if tracker_proc is None or not is_alive(tracker_proc):
                     tracker_proc = launch_tracker()
+                    _last_launch_t = time.monotonic()
                 else:
                     log.info(f"Tracker still alive (PID={tracker_proc.pid}), skipping")
 
@@ -261,16 +303,42 @@ def main() -> None:
                 if close_count >= CLOSE_DEBOUNCE:
                     if tracker_proc is not None and is_alive(tracker_proc):
                         kill_tracker(tracker_proc)
+                    # Also kill any orphaned tracker processes (e.g. if watchdog
+                    # was restarted and lost its Popen handle).
+                    kill_tracker_by_name()
                     tracker_proc = None
                     close_count  = 0
+                    crash_count  = 0
 
             else:
                 # ---- Antigravity stably open ------------------------------
                 close_count = 0
-                # Relaunch if tracker died unexpectedly while AG is open
+                # Relaunch if tracker died unexpectedly while AG is open,
+                # but give up after CRASH_LIMIT consecutive rapid crashes.
                 if tracker_proc is not None and not is_alive(tracker_proc):
-                    log.warning(f"Tracker died unexpectedly (exit={tracker_proc.returncode}). Check tracker.log for details. Relaunching...")
-                    tracker_proc = launch_tracker()
+                    elapsed = time.monotonic() - _last_launch_t
+                    if elapsed < CRASH_WINDOW_S:
+                        crash_count += 1
+                    else:
+                        crash_count = 1   # reset — this crash happened long after launch
+
+                    if crash_count >= CRASH_LIMIT:
+                        log.error(
+                            f"Tracker crashed {crash_count} times rapidly "
+                            f"(exit={tracker_proc.returncode}). "
+                            "Giving up relaunching — check tracker.log for errors."
+                        )
+                        tracker_proc = None
+                        # Don't reset crash_count here so we don't loop again;
+                        # it resets on the next rising edge (AG reopen).
+                    else:
+                        log.warning(
+                            f"Tracker died unexpectedly (exit={tracker_proc.returncode}, "
+                            f"crash {crash_count}/{CRASH_LIMIT}). "
+                            "Check tracker.log for details. Relaunching..."
+                        )
+                        tracker_proc = launch_tracker()
+                        _last_launch_t = time.monotonic()
 
             ag_was_running = ag_now
 
