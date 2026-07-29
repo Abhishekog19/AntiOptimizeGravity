@@ -41,6 +41,12 @@ IS_MAC     = sys.platform == "darwin"
 # ── Data files bundled with the tracker ───────────────────────────────────────
 DATA_FILES = [
     (ROOT / "dashboard" / "public",              "dashboard/public"),
+    # Bundle the entire local notifier package directory as a package-level
+    # data entry.  This is the reliable way to include local (non-pip) packages
+    # in a PyInstaller frozen build — collect_all('notifier') is NOT used here
+    # because PyInstaller resolves that via importlib, which may pick up the
+    # PyPI 'notifier' package (a different library) instead of src/notifier/.
+    (ROOT / "src" / "notifier",                  "notifier"),
     (ROOT / "src" / "notifier" / "config.example.env", "notifier"),
 ]
 _ENV_FILE = ROOT / "src" / "notifier" / ".env"
@@ -104,6 +110,20 @@ def _data_args() -> list:
     return args
 
 
+def _kill_running_exe(exe_name: str) -> None:
+    """Terminate any running instance of exe_name so PyInstaller can overwrite it."""
+    if not IS_WINDOWS:
+        return
+    # taskkill returns non-zero if the process isn't running — that's fine.
+    result = subprocess.run(
+        ["taskkill", "/F", "/IM", exe_name],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        print(f"  [INFO] Stopped running instance of {exe_name}")
+
+
 def _run_pyinstaller(cmd: list) -> None:
     print("Running PyInstaller…")
     result = subprocess.run(cmd, cwd=ROOT)
@@ -124,6 +144,9 @@ def build_tracker(onefile: bool = True, debug: bool = False) -> Path:
     print("Building quota-tracker (main tracker)…")
     print(f"  Bundle: {'one-file' if onefile else 'one-dir'}")
     print()
+
+    # Kill any running instance so PyInstaller can overwrite the exe (WinError 5)
+    _kill_running_exe("quota-tracker.exe")
 
     exe_name = "quota-tracker" if IS_WINDOWS else "AntigravityQuotaTracker"
 
@@ -161,21 +184,23 @@ def build_tracker(onefile: bool = True, debug: bool = False) -> Path:
         "sqlite3",
         "win10toast",
         "pkg_resources",
-        # notifier is a local package (src/notifier/) with an __init__.py that
-        # re-exports from notifier.notifier — both must be explicitly listed
-        # because PyInstaller does not auto-discover local packages after a
-        # folder restructure the same way pip-installed packages are discovered.
+        # notifier is a local package (src/notifier/) — both the package and
+        # the inner module must be listed so PyInstaller's import scanner
+        # records them.  The actual .py files are bundled via --add-data
+        # (DATA_FILES entry above); hiddenimports just tells the scanner that
+        # these names will be importable at runtime.
         "notifier",
         "notifier.notifier",
     ]
     for h in hidden:
         cmd.append(f"--hidden-import={h}")
 
-    # Collect full packages (data files + submodules) for tricky packages.
-    # notifier is a local package — must be listed explicitly; PyInstaller
-    # does not auto-collect local packages after a src/ folder restructure
-    # (same issue that required --collect-all pystray in the Final Phase work).
-    for pkg in ("pystray", "PIL", "flask", "werkzeug", "notifier"):
+    # Collect full packages (data files + submodules) for tricky pip packages.
+    # NOTE: 'notifier' is intentionally EXCLUDED from this list.  collect_all()
+    # resolves packages via importlib, so it may collect the PyPI 'notifier'
+    # package (a completely different library) instead of our local src/notifier/.
+    # The local package is bundled correctly via the --add-data entry above.
+    for pkg in ("pystray", "PIL", "flask", "werkzeug"):
         cmd.append(f"--collect-all={pkg}")
 
     # Add src/ to the module search path so PyInstaller finds server/, tray/, etc.
@@ -217,6 +242,9 @@ def build_watchdog(onefile: bool = True, debug: bool = False) -> Path | None:
     print("Building quota-watchdog (startup watchdog)…")
     print(f"  Bundle: {'one-file' if onefile else 'one-dir'}")
     print()
+
+    # Kill any running instance so PyInstaller can overwrite the exe (WinError 5)
+    _kill_running_exe("quota-watchdog.exe")
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
