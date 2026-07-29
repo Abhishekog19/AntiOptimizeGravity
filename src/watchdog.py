@@ -23,13 +23,20 @@ defined working directory (often defaults to System32).
 from __future__ import annotations   # must precede all other statements
 
 # ── Step 0: Pin CWD to this script's directory ────────────────────────────────
-# Must be the first executable code (right after __future__) so that every
-# subsequent open(), FileHandler, Popen, and Path(__file__).parent call works
-# correctly regardless of launch context (e.g. the Windows Run key provides no
-# defined CWD and often defaults to System32 — every relative path breaks).
+# FROZEN EXE NOTE: In a PyInstaller --onefile build, __file__ points to the
+# temp _MEIPASS extraction folder (which is deleted between runs), NOT to the
+# .exe file itself.  sys.executable always points to the actual .exe, so we
+# use that when frozen.  In dev mode __file__ is correct as-is.
 import os as _os
+import sys as _sys
 from pathlib import Path as _Path
-_os.chdir(_Path(__file__).resolve().parent)
+
+_SCRIPT_DIR = (
+    _Path(_sys.executable).resolve().parent   # frozen: dir containing the .exe
+    if getattr(_sys, "frozen", False)
+    else _Path(__file__).resolve().parent      # dev: src/ directory
+)
+_os.chdir(_SCRIPT_DIR)
 # ─────────────────────────────────────────────────────────────────────────────
 
 import os
@@ -42,10 +49,11 @@ from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Paths — all absolute, anchored to this script's location.
-# Using .resolve() guards against symlinks and any leftover relative components.
+# In frozen mode: _HERE = dir containing quota-watchdog.exe (e.g. dist/)
+# In dev mode:    _HERE = src/ directory (where watchdog.py lives)
 # ---------------------------------------------------------------------------
-_HERE     = Path(__file__).resolve().parent
-_LOG_FILE = _HERE / "watchdog.log"
+_HERE      = _SCRIPT_DIR
+_LOG_FILE  = _HERE / "watchdog.log"
 _CRASH_LOG = _HERE / "watchdog_crash.log"
 
 # ---------------------------------------------------------------------------
