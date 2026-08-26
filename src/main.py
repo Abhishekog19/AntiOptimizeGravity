@@ -14,14 +14,24 @@ All threads share the app_state singleton (state.py) for live status.
 """
 from __future__ import annotations   # must be first statement after docstring
 
-# ── Step 0: Pin CWD to this script's directory ────────────────────────────────
+# ── Step 0: Pin CWD to the app's directory ───────────────────────────────────
 # Must run before any other import or path resolution so that every subsequent
-# open(), FileHandler, and Path(__file__).parent call is correct regardless of
-# how the process was started (e.g. the Windows Run key provides no defined CWD
-# and often defaults to System32 — every relative path would silently break).
+# open(), FileHandler, and Path call is correct regardless of how the process
+# was started (e.g. the Windows Run key provides no defined CWD and often
+# defaults to System32 — every relative path would silently break).
+#
+# FROZEN EXE NOTE: in a PyInstaller --onefile build, __file__ points into the
+# temp _MEIPASS extraction dir (deleted between runs). sys.executable always
+# points at the actual .exe, so use its directory when frozen.
 import os as _os
+import sys as _sys
 from pathlib import Path as _Path
-_os.chdir(_Path(__file__).resolve().parent)
+_APP_DIR = (
+    _Path(_sys.executable).resolve().parent   # frozen: dir containing the .exe
+    if getattr(_sys, "frozen", False)
+    else _Path(__file__).resolve().parent      # dev: src/ directory
+)
+_os.chdir(_APP_DIR)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── PyInstaller packaged-exe WebView launcher early-exit ──────────────────────
@@ -72,7 +82,7 @@ import signal
 from pathlib import Path
 
 # ── Ensure project root AND notifier dir are on sys.path ─────────────────────
-_ROOT = Path(__file__).resolve().parent
+_ROOT = _APP_DIR   # dev: src/; frozen: dir containing the .exe (persistent)
 _NOTIFIER_DIR = _ROOT / "notifier"
 for _p in [str(_ROOT), str(_NOTIFIER_DIR)]:
     if _p not in sys.path:
@@ -230,13 +240,24 @@ def _register_windows_startup() -> None:
         tracker_name  = "AntigravityQuotaTracker"   # legacy — remove if present
 
         if getattr(sys, "frozen", False):
-            # Running as a packaged .exe — the watchdog exe lives alongside us
+            # Running as a packaged .exe — the watchdog exe lives alongside us.
+            # Never register a command that doesn't exist on disk.
             watchdog_exe = Path(sys.executable).parent / "quota-watchdog.exe"
+            if not watchdog_exe.exists():
+                log.warning(
+                    "quota-watchdog.exe not found next to the tracker — "
+                    "skipping startup registration."
+                )
+                return
             cmd = f'"{watchdog_exe}"'
         else:
             # Use pythonw.exe (same dir as python.exe) — no console window at boot
             pythonw = Path(sys.executable).parent / "pythonw.exe"
             if not pythonw.exists():
+                log.warning(
+                    "pythonw.exe not found — falling back to python.exe "
+                    "(a console window may flash at boot)."
+                )
                 pythonw = Path(sys.executable)   # fallback if pythonw not found
             watchdog_script = _ROOT / "watchdog.py"
             cmd = f'"{pythonw}" "{watchdog_script}"'
@@ -327,9 +348,12 @@ def _check_antigravity_installed() -> None:
 def _start_flask() -> None:
     try:
         from server.flask_app import run_flask
+        # Default to 127.0.0.1 so the (auth-free) API is not exposed to the
+        # LAN; set HOST=0.0.0.0 in the environment for remote/Tailscale access.
+        host = os.environ.get("HOST", "127.0.0.1")
         port = int(os.environ.get("PORT", "4300"))
-        log.info(f"Starting Flask dashboard on http://localhost:{port}")
-        run_flask(host="0.0.0.0", port=port, debug=False)
+        log.info(f"Starting Flask dashboard on http://{host}:{port}")
+        run_flask(host=host, port=port, debug=False)
     except Exception as exc:
         log.error(f"Flask server crashed: {exc}", exc_info=True)
         raise   # let crash_guard catch it at the outer level

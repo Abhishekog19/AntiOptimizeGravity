@@ -108,7 +108,10 @@ log = logging.getLogger("watchdog")
 # ---------------------------------------------------------------------------
 POLL_INTERVAL    = 3     # seconds between process checks
 CLOSE_DEBOUNCE   = 3     # consecutive absent polls before killing tracker
-ANTIGRAVITY_NAME = "antigravity ide"   # substring match on process name (lower)
+# Substring matches (lowercase) on process name. "antigravity" alone covers
+# installs where the exe is named Antigravity.exe rather than
+# "Antigravity IDE.exe" — must stay in sync with notifier._AG_NAMES.
+AG_NAMES         = ["antigravity ide", "antigravity"]
 TRACKER_EXE_NAME = "quota-tracker.exe" # used for orphan-kill by name
 CRASH_LIMIT      = 5    # stop relaunching after this many consecutive rapid crashes
 CRASH_WINDOW_S   = 10   # a crash within this many seconds of launch counts as rapid
@@ -119,6 +122,7 @@ CRASH_WINDOW_S   = 10   # a crash within this many seconds of launch counts as r
 if getattr(sys, "frozen", False):
     _TRACKER_EXE = _HERE / "quota-tracker.exe"
     _TRACKER_CMD = [str(_TRACKER_EXE)]
+    _TRACKER_SCRIPT = None
 else:
     _TRACKER_SCRIPT = _HERE / "main.py"   # src/main.py — absolute
     # Use pythonw.exe (GUI subsystem, no console) to launch the tracker.
@@ -149,7 +153,7 @@ def antigravity_running() -> bool:
     """True if any Antigravity IDE process is alive."""
     try:
         return any(
-            ANTIGRAVITY_NAME in (p.info["name"] or "").lower()
+            any(name in (p.info["name"] or "").lower() for name in AG_NAMES)
             for p in psutil.process_iter(["name"])
             if p.pid != _MY_PID
         )
@@ -228,32 +232,45 @@ def kill_tracker(proc: "subprocess.Popen") -> None:
 
 
 def kill_tracker_by_name() -> None:
-    """Kill any orphaned quota-tracker.exe processes not owned by this watchdog.
+    """Kill orphaned tracker processes not owned by this watchdog.
 
+    Frozen mode: matches quota-tracker.exe by process name.
+    Dev mode:     matches pythonw/python processes whose command line contains
+                  our exact main.py path (avoids killing unrelated projects).
     Called when Antigravity closes and tracker_proc is None (e.g. the watchdog
     was restarted after a build and lost its Popen handle, but a stale tracker
     process is still running).
     """
     killed = 0
-    for p in psutil.process_iter(["name", "pid"]):
+    for p in psutil.process_iter(["name", "pid", "cmdline"]):
         try:
-            if (p.info["name"] or "").lower() == TRACKER_EXE_NAME.lower():
-                log.info(f"Killing orphaned tracker PID={p.pid} by name...")
-                proc = psutil.Process(p.pid)
-                children = proc.children(recursive=True)
-                for ch in children:
-                    try:
-                        ch.terminate()
-                    except Exception:
-                        pass
-                proc.terminate()
-                _, alive = psutil.wait_procs([proc] + children, timeout=3)
-                for ap in alive:
-                    try:
-                        ap.kill()
-                    except Exception:
-                        pass
-                killed += 1
+            if p.pid == _MY_PID:
+                continue
+            name  = (p.info["name"] or "").lower()
+            match = name == TRACKER_EXE_NAME.lower()
+            if not match and not getattr(sys, "frozen", False):
+                cmdline = p.info.get("cmdline") or []
+                match   = _TRACKER_SCRIPT is not None and any(
+                    str(_TRACKER_SCRIPT) == arg for arg in cmdline
+                )
+            if not match:
+                continue
+            log.info(f"Killing orphaned tracker PID={p.pid} by name...")
+            proc = psutil.Process(p.pid)
+            children = proc.children(recursive=True)
+            for ch in children:
+                try:
+                    ch.terminate()
+                except Exception:
+                    pass
+            proc.terminate()
+            _, alive = psutil.wait_procs([proc] + children, timeout=3)
+            for ap in alive:
+                try:
+                    ap.kill()
+                except Exception:
+                    pass
+            killed += 1
         except (psutil.NoSuchProcess, ProcessLookupError):
             pass
         except Exception as exc:

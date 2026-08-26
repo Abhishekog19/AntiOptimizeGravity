@@ -118,15 +118,20 @@ def _safe_window_position() -> tuple:
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
         root.destroy()
-        # Place window 100px from top-left, clamped to screen bounds
-        x = min(100, max(0, sw - 480))
-        y = min(100, max(0, sh - 640))
+        # Prefer (100, 100) but clamp into screen bounds so the window is
+        # never off-screen on tiny displays.
+        x = max(0, min(100, sw - 480))
+        y = max(0, min(100, sh - 640))
         return x, y
     except Exception:
         return 100, 100
 
 
 # ── Dashboard window opener ───────────────────────────────────────────────────
+
+# Currently-running webview launcher subprocess (single-instance guard).
+_launcher_proc: Optional["subprocess.Popen"] = None
+
 
 def _open_dashboard_window(url: str = _DASHBOARD_URL) -> None:
     """
@@ -136,7 +141,14 @@ def _open_dashboard_window(url: str = _DASHBOARD_URL) -> None:
 
     Passes explicit --x / --y coordinates derived from _safe_window_position()
     so the window always opens on the primary monitor (multi-monitor guard).
+
+    Single-instance: if a previous launcher subprocess is still alive, a new
+    one is NOT spawned — repeated clicks can no longer pile up windows.
     """
+    global _launcher_proc
+    if _launcher_proc is not None and _launcher_proc.poll() is None:
+        log.info("Dashboard window already open — ignoring duplicate request")
+        return
     x, y = _safe_window_position()
     try:
         if getattr(sys, "frozen", False):
@@ -150,6 +162,7 @@ def _open_dashboard_window(url: str = _DASHBOARD_URL) -> None:
                 sys.executable, _LAUNCHER_SCRIPT, url,
                 "--x", str(x), "--y", str(y),
             ])
+        _launcher_proc = proc
 
         # Give the process ~2 s to start; if it exits immediately it crashed
         time.sleep(2.0)
@@ -400,8 +413,32 @@ class TrayIcon:
         )
 
         threading.Thread(target=self._startup_sequence, daemon=True, name="TrayStartup").start()
+        threading.Thread(target=self._visibility_guard, daemon=True, name="TrayVisGuard").start()
         log.info("Tray icon running. Left-click = Open Dashboard | Right-click = menu")
         self._icon.run()   # blocks
+
+    def _visibility_guard(self) -> None:
+        """
+        Re-add the tray icon if Shell_NotifyIcon silently failed.
+
+        When the tracker is auto-launched at Windows login (via the watchdog),
+        Explorer's notification area may not be ready yet and the initial
+        Shell_NotifyIcon(NIM_ADD) can fail with no error surfaced — the
+        process runs fine but no icon ever appears ("glitchy" startup).
+        pystray re-registers whenever .visible transitions False → True,
+        so polling and forcing it back on recovers from this reliably.
+        """
+        while True:
+            time.sleep(5)
+            icon = self._icon
+            if icon is None:
+                continue
+            try:
+                if not icon.visible:
+                    icon.visible = True
+                    log.info("Tray icon was not visible — re-registered it")
+            except Exception as exc:
+                log.debug("Visibility guard error: %s", exc)
 
     def update_icon(self, accounts: list) -> None:
         if not self._icon:
