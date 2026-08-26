@@ -122,6 +122,10 @@ A **manual capture** is always available via right-click → Capture Now in the 
 
 No port-forwarding, no dynamic DNS, no deployment required.
 
+> **Note:** the dashboard server binds to `127.0.0.1` by default. For remote
+> access, set `HOST=0.0.0.0` in `notifier/.env` (and ideally set
+> `DASHBOARD_API_KEY` too) and restart the tracker.
+
 ---
 
 ## Configuration
@@ -135,6 +139,7 @@ Copy `notifier/config.example.env` to `notifier/.env` and edit values:
 | `DEBOUNCE_SECONDS` | `2` | Min seconds between captures |
 | `DASHBOARD_URL` | `http://localhost:4300` | Dashboard URL |
 | `DASHBOARD_API_KEY` | *(empty)* | Optional API key for remote access |
+| `HOST` | `127.0.0.1` | Flask bind address — set to `0.0.0.0` for Tailscale/LAN remote access |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARN` / `ERROR` |
 
 ---
@@ -186,20 +191,18 @@ and optionally (prompt, default: No) deletes your quota history.
 
 ```
 AntiOptimizeGravity/
-├── main.py                    # Entry point — tracker, tray icon, Flask server
-├── watchdog.py                # Auto-launcher: watches for Antigravity, launches tracker
-├── build.py                   # PyInstaller packaging — builds tracker + watchdog exe
-├── state.py                   # Shared app state (thread-safe singleton)
-├── server/                    # Flask API server + SQLite queries
-├── tray/                      # pystray tray icon + diagnostic mode
-├── notifier/                  # CDP watcher (2 triggers: launch + GetTurnDiff)
-│   └── requirements.txt       # Python dependencies
+├── src/
+│   ├── main.py                # Entry point — tracker, tray icon, Flask server
+│   ├── watchdog.py            # Auto-launcher: watches for Antigravity, launches tracker
+│   ├── webview_launcher.py    # Native dashboard window subprocess
+│   ├── state.py               # Shared app state (thread-safe singleton)
+│   ├── server/                # Flask API server + SQLite queries
+│   ├── tray/                  # pystray tray icon + diagnostic mode
+│   └── notifier/              # CDP watcher (2 triggers: launch + GetTurnDiff)
 ├── dashboard/
 │   └── public/                # Web dashboard (HTML/CSS/JS)
 ├── installer/
 │   └── setup.iss              # Inno Setup 6 installer script
-├── .github/workflows/
-│   └── release.yml            # GitHub Actions: build + release on v* tag push
 ├── scripts/
 │   ├── setup-windows.ps1      # Manual shortcut patcher (for run-from-source users)
 │   ├── uninstall-windows.ps1  # Manual uninstall script
