@@ -323,6 +323,11 @@ def _ws_eval_stdlib(ws_url: str, expression: str, timeout: float = 8.0):
             raise ConnectionError("WebSocket handshake failed")
         buf += chunk
 
+    # Preserve any bytes received after the handshake headers — they may be
+    # the start of the first WebSocket frame; discarding them can lose the
+    # response entirely and stall until timeout.
+    _hdrs, _sep, raw = buf.partition(b"\r\n\r\n")
+
     payload = json.dumps({
         "id": 1, "method": "Runtime.evaluate",
         "params": {"expression": expression, "returnByValue": True, "awaitPromise": False},
@@ -339,7 +344,6 @@ def _ws_eval_stdlib(ws_url: str, expression: str, timeout: float = 8.0):
     sock.sendall(header + masked)
 
     sock.settimeout(timeout)
-    raw      = b""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -627,22 +631,43 @@ def invalidate_settings_session() -> None:
             _settings_session = None
 
 
-def ensure_settings_open(port: int = CDP_PORT) -> Optional[CdpSession]:
+def ensure_settings_open(port: int = CDP_PORT,
+                         push_if_missing: bool = True) -> Optional[CdpSession]:
     """
     Ensure the Settings > Models panel is open and return a CdpSession.
 
     If the settingsScreen CDP target already exists, returns a session to it.
-    If not, tries to navigate any editor page to the Settings URL via
-    history.pushState, waits up to 5 s for the target to appear, then
-    returns a session.  Returns None if all attempts fail.
+    If not and push_if_missing is True, tries to navigate any editor page to
+    the Settings URL via history.pushState (this takes over the user's
+    editor window — use sparingly), waits up to 6 s for the target to appear,
+    then returns a session.
+    If push_if_missing is False, only looks for an already-open Settings panel
+    and returns None without touching the UI.
 
+    Returns None if all attempts fail.
     Used by the launch trigger which needs to open Settings programmatically
     when the user may not have it open.
     """
+    global _settings_session
+
     # Fast path: settings already open
     existing = get_settings_session()
     if existing:
         return existing
+
+    # Passive mode: just look for an already-open Settings target, never
+    # navigate the user's editor.
+    if not push_if_missing:
+        target = find_settings_target(port)
+        if target:
+            ws_url = target.get("webSocketDebuggerUrl")
+            if ws_url:
+                with _session_lock:
+                    if _settings_session:
+                        _settings_session.close()
+                    _settings_session = CdpSession(ws_url)
+                return _settings_session
+        return None
 
     log("  Settings target not found — attempting to open via CDP...", level="DEBUG")
 
@@ -666,7 +691,6 @@ def ensure_settings_open(port: int = CDP_PORT) -> Optional[CdpSession]:
         if target:
             ws_url = target.get("webSocketDebuggerUrl")
             if ws_url:
-                global _settings_session
                 with _session_lock:
                     if _settings_session:
                         _settings_session.close()
@@ -1228,15 +1252,31 @@ def run_capture_sequence(trigger: str, needs_refresh: bool = True,
                    obtained from ensure_settings_open().
     """
     # Lock is already held by our caller (_fire_capture); nothing to set here.
-    captured_at = datetime.datetime.now()
+    # UTC so readings align with the timestamp_utc column and analytics cutoffs.
+    captured_at = datetime.datetime.now(datetime.timezone.utc)
     if _HAS_APP_STATE and _app_state:
         _app_state.set_capturing(True, trigger)
     log(f"== Capture [{trigger}] started ==================================")
     try:
         # 1. Acquire Settings session.
-        #    For the launch trigger the Settings panel may not be open yet,
-        #    so ensure_settings_open() tries to open it via CDP.
-        sess = session or ensure_settings_open()
+        #    For the launch trigger the Settings panel may not be open yet:
+        #    attempt 1 pushes the Settings URL via CDP (opens the panel),
+        #    then we poll passively for ~21 s in case the user (or Antigravity
+        #    itself) opens it — without repeatedly hijacking the editor view.
+        sess = session
+        if sess is None:
+            attempts = 8 if trigger == "launch" else 1
+            for attempt in range(attempts):
+                sess = ensure_settings_open(push_if_missing=(attempt == 0))
+                if sess is not None:
+                    break
+                if attempt < attempts - 1:
+                    log(
+                        f"  Settings panel not open yet "
+                        f"(attempt {attempt + 1}/{attempts}) — waiting...",
+                        level="DEBUG",
+                    )
+                    time.sleep(3)
         if sess is None:
             if trigger == "launch":
                 # At launch time the Settings panel is not yet open — this is

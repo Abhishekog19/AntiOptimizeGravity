@@ -44,6 +44,10 @@ else:
 # ── Config (from environment / .env loaded by main.py) ────────────────────────
 API_KEY        = os.environ.get("DASHBOARD_API_KEY", "")
 PORT           = int(os.environ.get("PORT", "4300"))
+# 127.0.0.1 by default: the API has no auth unless DASHBOARD_API_KEY is set,
+# so never expose it to the network unless the user explicitly asks for it
+# via HOST=0.0.0.0 (needed only for Tailscale/LAN remote access).
+HOST           = os.environ.get("HOST", "127.0.0.1")
 
 # ── In-memory heartbeat state ──────────────────────────────────────────────────
 # The notifier POSTs here every 15 s.  The dashboard polls GET /api/status.
@@ -207,7 +211,7 @@ def create_app() -> Flask:
 
 
 
-def run_flask(host: str = "0.0.0.0", port: int = PORT, debug: bool = False) -> None:
+def run_flask(host: str = HOST, port: int = PORT, debug: bool = False) -> None:
     """Start Flask (blocking). Call in a daemon thread from main.py."""
     from state import app_state
     app = create_app()
@@ -216,6 +220,6 @@ def run_flask(host: str = "0.0.0.0", port: int = PORT, debug: bool = False) -> N
     import logging as _logging
     _logging.getLogger("werkzeug").setLevel(_logging.WARNING)
 
-    app_state.log("Flask dashboard starting on port 4300...", app_state.LEVEL_INFO)
+    app_state.log(f"Flask dashboard starting on port {port}...", app_state.LEVEL_INFO)
     app_state.set_flask_ready(True)
     app.run(host=host, port=port, debug=debug, use_reloader=False)

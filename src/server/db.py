@@ -12,16 +12,25 @@ from __future__ import annotations
 import sqlite3
 import os
 import re
+import sys
 import datetime
 import math
 from pathlib import Path
 from typing import Optional
 
 # ── Database location ─────────────────────────────────────────────────────────
-# Stored at the same path as the old Node.js version for backwards-compat.
-# db.py is at src/server/db.py — three .parent calls reach the repo root.
-_HERE     = Path(__file__).parent.parent.parent  # src/server → src → repo root
-_DATA_DIR = _HERE / "dashboard" / "data"
+# Dev mode:     <repo root>/dashboard/data/quota.db  (legacy Node.js location)
+# Frozen exe:   <dir containing quota-tracker.exe>/dashboard/data/quota.db
+#
+# CRITICAL: in a PyInstaller --onefile build, __file__ points into the temp
+# _MEIPASS extraction dir which is DELETED after every run — storing the DB
+# there would wipe the user's history on every restart. Anchor to the exe's
+# own directory when frozen (matches setup.iss uninstaller DbPath).
+if getattr(sys, "frozen", False):
+    _DATA_DIR = Path(sys.executable).resolve().parent / "dashboard" / "data"
+else:
+    _HERE     = Path(__file__).parent.parent.parent  # src/server → src → repo root
+    _DATA_DIR = _HERE / "dashboard" / "data"
 _DATA_DIR.mkdir(parents=True, exist_ok=True)
 _DB_PATH  = _DATA_DIR / "quota.db"
 
@@ -219,11 +228,12 @@ def list_accounts_with_latest() -> list:
 
 
 def get_history(account_id: str, limit: int = 500) -> list:
+    """Return the most recent `limit` readings, oldest-first (chronological)."""
     rows = _conn.execute(
-        "SELECT * FROM readings WHERE account_id = ? ORDER BY timestamp_utc ASC LIMIT ?",
+        "SELECT * FROM readings WHERE account_id = ? ORDER BY timestamp_utc DESC LIMIT ?",
         (account_id, limit)
     ).fetchall()
-    return [dict(r) for r in rows]
+    return [dict(r) for r in reversed(rows)]
 
 
 # ── Analytics ─────────────────────────────────────────────────────────────────
@@ -234,9 +244,12 @@ def get_analytics(days: Optional[int]) -> dict:
     Mirrors getAnalytics() from db.js.
     """
     if days:
-        cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).isoformat()
+        cutoff = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(days=days)
+        ).isoformat()
     else:
-        cutoff = "1970-01-01T00:00:00.000000"
+        cutoff = "1970-01-01T00:00:00+00:00"
 
     accounts = _conn.execute("SELECT id, custom_name FROM accounts").fetchall()
 
@@ -293,13 +306,31 @@ def get_analytics(days: Optional[int]) -> dict:
     ]
 
     # ── Session count ─────────────────────────────────────────────────────────
-    session_count = _conn.execute(
-        "SELECT COUNT(*) AS cnt FROM readings WHERE claude_fivehour_pct < 15 AND timestamp_utc >= ?",
-        (cutoff,)
-    ).fetchone()["cnt"] or 0
+    # A "session" = a transition into the low-quota state (five-hour pct < 15)
+    # per account. Counting raw rows below the threshold would inflate the
+    # number, since every reading taken while depleted would count.
+    session_rows = _conn.execute("""
+        SELECT account_id, claude_fivehour_pct
+        FROM readings
+        WHERE claude_fivehour_pct IS NOT NULL AND timestamp_utc >= ?
+        ORDER BY account_id ASC, timestamp_utc ASC
+    """, (cutoff,)).fetchall()
+    session_count = 0
+    prev_account  = None
+    prev_below    = False
+    for r in session_rows:
+        below = r["claude_fivehour_pct"] < 15
+        if r["account_id"] != prev_account:
+            prev_below = False   # new account: no prior state carried over
+        if below and not prev_below:
+            session_count += 1
+        prev_below   = below
+        prev_account = r["account_id"]
 
     # ── Projection ────────────────────────────────────────────────────────────
-    last7_cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=7)).isoformat()
+    last7_cutoff = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
+    ).isoformat()
     days_remaining = None
     try:
         burn_rows = _conn.execute("""
