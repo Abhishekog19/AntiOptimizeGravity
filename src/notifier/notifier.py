@@ -1503,9 +1503,26 @@ def main() -> None:
                 invalidate_settings_session()
                 if _HAS_APP_STATE and _app_state:
                     _app_state.log(
-                        "Antigravity closed — reopen to continue tracking",
+                        "Antigravity closed — tracker shutting down",
                         _app_state.LEVEL_WARN,
                     )
+
+                # ── Auto-shutdown ─────────────────────────────────────────────
+                # Give Antigravity a 5-second grace period in case it is doing
+                # a quick restart (e.g. extension update, relaunch from the IDE).
+                # If it comes back within that window, stay alive.
+                # If not, exit so the watchdog can re-launch us fresh on the
+                # next Antigravity open.
+                log("Waiting 5 s grace period before shutdown...")
+                time.sleep(5)
+                if find_antigravity_process() is not None:
+                    log("Antigravity restarted during grace period — staying alive")
+                    ag_was_running = True
+                    continue
+                log("Antigravity confirmed closed — tracker exiting.")
+                import os as _os_exit
+                _os_exit._exit(0)
+
 
             ag_was_running = ag_running
 
