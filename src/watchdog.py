@@ -125,19 +125,33 @@ if getattr(sys, "frozen", False):
     _TRACKER_SCRIPT = None
 else:
     _TRACKER_SCRIPT = _HERE / "main.py"   # src/main.py — absolute
-    # Use pythonw.exe (GUI subsystem, no console) to launch the tracker.
+    # Use python.exe (not pythonw.exe) to launch the tracker in dev mode.
     #
-    # Why pythonw and not python.exe?
-    # - python.exe is a console app. When spawned by pythonw (no console),
-    #   Windows creates a NEW console window — the ugly black terminal flash.
-    # - pythonw.exe is a GUI app. When spawned by pythonw, no console window
-    #   is ever created, but the interactive desktop is fully inherited so
-    #   Shell_NotifyIcon (pystray tray icon) works correctly.
-    # - stdout/stderr are redirected to tracker.log, so nothing is lost.
-    _pythonw_exe = Path(sys.executable).parent / "pythonw.exe"
-    if not _pythonw_exe.exists():
-        _pythonw_exe = Path(sys.executable).parent / "python.exe"  # fallback
-    _TRACKER_CMD = [str(_pythonw_exe), str(_TRACKER_SCRIPT)]
+    # Why python.exe and not pythonw.exe in dev mode?
+    # - pythonw.exe is the GUI-subsystem Python: it has no stdout/stderr at
+    #   all. When spawned with stdout=file/stderr=file, the C runtime
+    #   internally still has no real file descriptors — this causes threads
+    #   (including Flask/Werkzeug) to silently stall or die during startup.
+    # - python.exe is the console Python and supports file redirection fully.
+    #   All output goes to tracker.log, so there is no visible console window
+    #   as long as creationflags=CREATE_NEW_PROCESS_GROUP is used (see below).
+    # - At boot (via the Run registry key), the watchdog is launched as
+    #   pythonw.exe. In that context the child inherits a proper interactive
+    #   session and pythonw.exe works fine. For dev-mode runs from PowerShell
+    #   or a terminal, python.exe is more robust.
+    _python_exe = Path(sys.executable).parent / "python.exe"
+    _TRACKER_CMD = [str(_python_exe), str(_TRACKER_SCRIPT)]
+
+# Windows creation flags used when spawning the tracker subprocess.
+# DETACHED_PROCESS (0x8):     Break from the watchdog's console session entirely.
+#                              The tracker becomes fully independent — it survives
+#                              even if the watchdog or its PowerShell parent dies.
+# CREATE_NEW_PROCESS_GROUP (0x200): Give the child its own process group so it
+#                              isn't delivered Ctrl+C signals from the parent and
+#                              properly gets the user's interactive window station.
+# The combination of both flags is safe and is the standard Windows recipe for
+# launching a persistent background GUI/service process from a helper script.
+_DETACH_FLAGS = 0x00000200 | 0x00000008  # CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
 
 _MY_PID = os.getpid()
 log.info(f"Watchdog started PID={_MY_PID}  cwd={os.getcwd()!r}")
@@ -168,17 +182,23 @@ def antigravity_running() -> bool:
 def launch_tracker() -> "subprocess.Popen | None":
     """Spawn the tracker. Returns the Popen handle, or None on failure.
 
-    No special creationflags are used here intentionally.
+    Uses CREATE_NEW_PROCESS_GROUP so the child gets its own process group
+    and properly inherits the interactive user session's window station —
+    not the watchdog's potentially-restricted one.
 
-    When the watchdog (pythonw.exe, no console) spawns python.exe with no
-    flags, the child inherits the parent's window station and interactive
-    desktop — which is required for Shell_NotifyIcon to show the tray icon.
-    No console window will flash because pythonw.exe has no console to
-    pass down. CREATE_NO_WINDOW and DETACHED_PROCESS both restrict the
-    desktop context and cause the tray icon to register but never appear.
+    Background: when the watchdog is started at boot via the Windows Run
+    registry key, Windows assigns it an interactive desktop and
+    Shell_NotifyIcon works fine. When started manually from a hidden
+    PowerShell process (Start-Process -WindowStyle Hidden), the watchdog
+    gets a restricted non-interactive window station, and the child would
+    silently inherit that — causing pystray to die with no error.
 
-    stdout/stderr are redirected to tracker.log so there is no visible
-    console even if the fallback interpreter is python.exe.
+    CREATE_NEW_PROCESS_GROUP breaks the inheritance of the restricted
+    station, so Windows re-attaches the child to the user's interactive
+    session, which is what pystray needs.
+
+    stdout/stderr are kept open (not closed via `with`) so the child
+    process can continue writing to tracker.log throughout its lifetime.
 
     cwd is explicitly set to _HERE (the src/ directory) so that main.py's
     own __file__-relative paths resolve correctly regardless of what CWD
@@ -187,16 +207,22 @@ def launch_tracker() -> "subprocess.Popen | None":
     log.info("Launching tracker...")
     tracker_log = _HERE / "tracker.log"   # absolute path
     try:
-        with open(tracker_log, "a", encoding="utf-8") as fout:
-            proc = subprocess.Popen(
-                _TRACKER_CMD,
-                stdout=fout,
-                stderr=fout,
-                cwd=str(_HERE),   # pin tracker's CWD to src/ — same guarantee
-                # No creationflags — child inherits interactive desktop from
-                # the pythonw.exe watchdog, which is what pystray needs.
-            )
-        log.info(f"Tracker launched PID={proc.pid}  (output -> tracker.log)")
+        # Open tracker.log in append mode and keep the handle open.
+        # DETACHED_PROCESS means the child has no parent console at all —
+        # stdout/stderr are the redirected file handles we pass here.
+        fout = open(tracker_log, "a", encoding="utf-8")  # noqa: WPS515
+        creation_flags = _DETACH_FLAGS if sys.platform == "win32" else 0
+        proc = subprocess.Popen(
+            _TRACKER_CMD,
+            stdout=fout,
+            stderr=fout,
+            cwd=str(_HERE),   # pin tracker's CWD to src/
+            creationflags=creation_flags,
+            close_fds=False,  # keep inherited handles (file handle for tracker.log)
+        )
+        log.info(
+            f"Tracker launched PID={proc.pid}  flags={creation_flags:#x}  (output -> tracker.log)"
+        )
         return proc
     except Exception as exc:
         log.error(f"Failed to launch tracker: {exc}")
